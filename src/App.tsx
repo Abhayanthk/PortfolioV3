@@ -52,11 +52,11 @@ const SCAB_DROP = 0.32 // scabbard offset perpendicular to the blade (fraction o
 const CLIP_DRAW_CLEAR = 0.3 // p ≤ this: clip ON (covers the unsheathe, blade clears by 0.2)
 const CLIP_RESHEATHE = 0.62 // p ≥ this: clip ON again (scabbard back home, blade slides in)
 
-/* ---- Damping (higher = snappier, lower = floatier). The soul of the feel. - */
-const OBJ_DAMP = 3.4 // sword / scabbard position easing
-const POSE_DAMP = 3.0 // rotation easing
-const CAM_DAMP = 2.4 // camera position easing
-const LOOK_DAMP = 2.8 // look-target easing
+/* ---- Damping — the SINGLE source of smoothing ----------------------------- */
+// One progress value `p` is damped toward the raw scroll each frame; EVERYTHING
+// (clip time, blade, scabbard, camera) is a pure function of that same `p`, so all
+// parts stay in lockstep at any scroll speed. Higher = snappier, lower = floatier.
+const PROGRESS_DAMP = 3.0
 
 /* ============================================================================
  *  Helpers
@@ -288,10 +288,9 @@ type ClipData = {
   scabQuat: THREE.Quaternion
 }
 
-function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
+function Katana({ axesRef, progressRef }: DriveProps) {
   const { scene, animations } = useGLTF(MODEL_URL)
   const { actions, mixer } = useAnimations(animations, scene)
-  const scroll = useScroll()
   const { size, gl } = useThree()
 
   const poseRef = useRef<THREE.Group>(null!)
@@ -373,35 +372,28 @@ function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
     clipRef.current = { mixer, action, duration, displayQuat, scabPos, scabQuat }
   }, [actions, mixer, axes])
 
-  const qTarget = useMemo(() => new THREE.Quaternion(), [])
-  const clipFrac = useRef(0)
-  const scabPart = useRef(0)
   const mouthWorld = useMemo(() => new THREE.Vector3(), [])
   const axisWorld = useMemo(() => new THREE.Vector3(), [])
 
-  useFrame((_, dt) => {
+  useFrame(() => {
     const cd = clipRef.current
     if (!cd) return
-    const p = scroll.offset
+    const p = progressRef.current // the ONE smoothed progress — no per-element damping
     const { scabbard, scab0, scabQuat0, mouthLocal, drawAxisLocal } = axes
 
-    // UNSHEATHE: scrub the built-in clip by scroll (damped). 0→0.2 out, 0.62→0.8 in.
-    const fracTarget = plateau(p, CLIP.in, CLIP.out, CLIP.backIn, CLIP.backOut)
-    clipFrac.current = damp(clipFrac.current, fracTarget, OBJ_DAMP, dt)
-    cd.action.time = clipFrac.current * cd.duration
+    // UNSHEATHE: clip time is a pure function of p. 0→0.2 out, held, 0.62→0.8 in.
+    const frac = plateau(p, CLIP.in, CLIP.out, CLIP.backIn, CLIP.backOut)
+    cd.action.time = frac * cd.duration
     cd.mixer.update(0) // applies the blade pose for this clip time
 
-    // SCABBARD: glide from rest to the parallel target (under the drawn blade + drop).
+    // SCABBARD: glide rest → parallel target (under the drawn blade + drop) by part(p).
     const part = plateau(p, PART.in, PART.out, PART.backIn, PART.backOut)
-    scabPart.current = damp(scabPart.current, part, OBJ_DAMP, dt)
-    const sp = scabPart.current
-    scabbard.position.lerpVectors(scab0, cd.scabPos, sp)
-    scabbard.quaternion.slerpQuaternions(scabQuat0, cd.scabQuat, sp)
+    scabbard.position.lerpVectors(scab0, cd.scabPos, part)
+    scabbard.quaternion.slerpQuaternions(scabQuat0, cd.scabQuat, part)
 
-    // POSE: rotate the whole assembly from diagonal hero toward horizontal display.
+    // POSE: diagonal hero → horizontal display, set directly from poseAmt(p).
     const poseAmt = plateau(p, POSE.in, POSE.out, POSE.backIn, POSE.backOut)
-    qTarget.slerpQuaternions(HERO_QUAT, cd.displayQuat, poseAmt)
-    poseRef.current.quaternion.slerp(qTarget, 1 - Math.exp(-POSE_DAMP * dt))
+    poseRef.current.quaternion.slerpQuaternions(HERO_QUAT, cd.displayQuat, poseAmt)
 
     // CLIP PLANE: hide the blade still inside the sheath. Sits at the scabbard mouth,
     // normal along the bore tangent; anchored in the scabbard's LOCAL frame so it
@@ -431,23 +423,21 @@ function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
  *  damped like a slow film dolly.
  * ========================================================================== */
 
-function Rig({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
-  const scroll = useScroll()
+function Rig({ axesRef, progressRef }: DriveProps) {
   const { camera } = useThree()
 
   const focus = useMemo(() => new THREE.Vector3(), [])
   const pa = useMemo(() => new THREE.Vector3(), [])
   const pb = useMemo(() => new THREE.Vector3(), [])
   const off = useMemo(() => new THREE.Vector3(), [])
-  const camTarget = useMemo(() => new THREE.Vector3(), [])
-  const look = useMemo(() => new THREE.Vector3(), [])
 
-  useFrame((_, dt) => {
+  useFrame(() => {
     const axes = axesRef.current
     if (!axes) return
-    const p = scroll.offset
+    const p = progressRef.current // same smoothed progress as the blade/scabbard
 
-    // Live focus = midpoint of sword & scabbard → frame stays centered as they move.
+    // Live focus = midpoint of sword & scabbard (both already posed from p this frame),
+    // so the camera is a PURE function of p too — set directly, no extra damping.
     axes.sword.getWorldPosition(pa)
     axes.scabbard.getWorldPosition(pb)
     focus.copy(pa).add(pb).multiplyScalar(0.5)
@@ -456,16 +446,8 @@ function Rig({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
     const driftAmt = plateau(p, DRIFT.a, DRIFT.b, DRIFT.c, DRIFT.d)
 
     off.copy(HERO_OFF).lerp(DISPLAY_OFF, frameAmt).addScaledVector(DRIFT_DIR, driftAmt)
-    camTarget.copy(focus).add(off)
-
-    camera.position.x = damp(camera.position.x, camTarget.x, CAM_DAMP, dt)
-    camera.position.y = damp(camera.position.y, camTarget.y, CAM_DAMP, dt)
-    camera.position.z = damp(camera.position.z, camTarget.z, CAM_DAMP, dt)
-
-    look.x = damp(look.x, focus.x, LOOK_DAMP, dt)
-    look.y = damp(look.y, focus.y, LOOK_DAMP, dt)
-    look.z = damp(look.z, focus.z, LOOK_DAMP, dt)
-    camera.lookAt(look)
+    camera.position.copy(focus).add(off)
+    camera.lookAt(focus)
   })
 
   return null
@@ -475,9 +457,30 @@ function Rig({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
  *  Scene — lights, environment reflections (UNCHANGED), the katana, the rig
  * ========================================================================== */
 
-function Scene({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
+type DriveProps = {
+  axesRef: React.MutableRefObject<Axes | null>
+  progressRef: React.MutableRefObject<number>
+}
+
+// Runs FIRST each frame: damps the one shared progress `p` toward the RAW scroll
+// (read straight off the DOM container, bypassing ScrollControls' own smoothing).
+// Everything else reads progressRef.current, so all parts share a single timeline.
+function Progress({ progressRef }: { progressRef: React.MutableRefObject<number> }) {
+  const data = useScroll()
+  useFrame((_, dt) => {
+    const el = data.el
+    const raw = el ? el.scrollTop / (el.scrollHeight - el.clientHeight || 1) : 0
+    progressRef.current = damp(progressRef.current, clamp01(raw), PROGRESS_DAMP, dt)
+  })
+  return null
+}
+
+function Scene({ axesRef, progressRef }: DriveProps) {
   return (
     <>
+      {/* Single smoothed progress — updated before Katana & Rig read it. */}
+      <Progress progressRef={progressRef} />
+
       {/* Key light: hard, raking, defines the blade's edge. */}
       <directionalLight position={[4, 6, 5]} intensity={2.4} color="#fff6ea" />
       {/* Soft fill from the opposite side so shadows aren't crushed. */}
@@ -488,8 +491,8 @@ function Scene({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
       {/* Studio HDRI for real metal reflections — kept OUT of the background. */}
       <Environment preset="studio" background={false} />
 
-      <Katana axesRef={axesRef} />
-      <Rig axesRef={axesRef} />
+      <Katana axesRef={axesRef} progressRef={progressRef} />
+      <Rig axesRef={axesRef} progressRef={progressRef} />
     </>
   )
 }
@@ -500,6 +503,7 @@ function Scene({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
 
 export default function App() {
   const axesRef = useRef<Axes | null>(null)
+  const progressRef = useRef(0)
 
   return (
     <>
@@ -515,9 +519,10 @@ export default function App() {
         <color attach="background" args={['#0a0a0a']} />
 
         <Suspense fallback={null}>
-          {/* pages = scroll length. 4 gives the choreography room to breathe. */}
-          <ScrollControls pages={4} damping={0.25}>
-            <Scene axesRef={axesRef} />
+          {/* pages = scroll length. Progress reads the RAW DOM scroll directly and is
+              the ONLY smoother, so ScrollControls' own damping is left at default. */}
+          <ScrollControls pages={4}>
+            <Scene axesRef={axesRef} progressRef={progressRef} />
           </ScrollControls>
         </Suspense>
       </Canvas>
