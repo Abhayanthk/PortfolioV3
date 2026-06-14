@@ -1,6 +1,6 @@
 import { Suspense, useLayoutEffect, useMemo, useRef } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Environment, Loader, ScrollControls, useGLTF, useScroll } from '@react-three/drei'
+import { Environment, Loader, ScrollControls, useAnimations, useGLTF, useScroll } from '@react-three/drei'
 import * as THREE from 'three'
 
 /* ============================================================================
@@ -22,6 +22,8 @@ const MODEL_URL = '/katana.glb'
 // e.g. "katana blade.001" → "katana_blade001". We match by normalized name below.
 const SWORD_PREFIX = 'katana blade'
 const SCABBARD_PREFIX = 'katana cover'
+// The GLB's built-in unsheathe clip (animates the blade node). Scrubbed by scroll.
+const CLIP_NAME = 'katana blade.001|Action.013'
 
 /* ---- Framing (tight & cinematic — katana fills most of the frame) --------- */
 const FOV = 32 // degrees. Long lens = flatter, more filmic.
@@ -31,25 +33,24 @@ const DISPLAY_OFF = new THREE.Vector3(0.0, -0.1, 7.4) // pulled back to reveal t
 const DRIFT_DIR = new THREE.Vector3(1.25, 0.0, 0.0) // lateral camera drift across the blade (hold)
 
 /* ---- Scroll breakpoints (progress 0 → 1) ---------------------------------- */
-//  0.00–0.20  unsheathe        |  0.20–0.32  rotate toward horizontal
-//  0.32–0.48  scabbard parallel|  0.48–0.62  hold + camera drift
-//  0.62–0.80  resheathe         |  0.80–1.00  camera returns to hero
-const DRAW = { in: 0.0, out: 0.2, backIn: 0.7, backOut: 0.8 } // sword draw ramp edges
+//  0.00–0.20  unsheathe (built-in clip)  |  0.20–0.32  rotate toward horizontal
+//  0.32–0.48  scabbard glides parallel   |  0.48–0.54  hold + camera drift
+//  0.54–0.62  scabbard returns           |  0.62–0.80  resheathe (clip reversed)
+//  0.80–1.00  camera returns to hero
+const CLIP = { in: 0.0, out: 0.2, backIn: 0.62, backOut: 0.8 } // scroll→clip-time ramp
 const POSE = { in: 0.2, out: 0.32, backIn: 0.8, backOut: 1.0 } // diagonal→horizontal ramp
-const PART = { in: 0.32, out: 0.48, backIn: 0.62, backOut: 0.7 } // scabbard parallel ramp
+const PART = { in: 0.32, out: 0.48, backIn: 0.54, backOut: 0.62 } // scabbard parallel ramp (back before resheathe)
 const FRAME = { in: 0.2, out: 0.48, backIn: 0.8, backOut: 1.0 } // hero→display camera ramp
-const DRIFT = { a: 0.46, b: 0.52, c: 0.58, d: 0.64 } // hold drift bump
+const DRIFT = { a: 0.46, b: 0.5, c: 0.52, d: 0.56 } // hold drift bump
 
-/* ---- Object motion (as FRACTIONS of blade length, so they self-scale) ----- */
-const DRAW_DIST = 0.95 // arc length of the full draw, as a fraction of blade length
-const SCAB_DROP = 0.32 // scabbard offset perpendicular to the blade (drops it below)
-const SAYA_BIKI = 0.45 // sheath pull-back during the draw, as a fraction of the blade's draw angle
+/* ---- Object motion -------------------------------------------------------- */
+const SCAB_DROP = 0.32 // scabbard offset perpendicular to the blade (fraction of blade length)
 
 /* ---- Clip plane: hides the blade portion still inside the sheath ----------- */
-// Active during the draw + resheathe (when the blade overlaps the bore); OFF during
-// the display layout, where the blade is fully drawn and must be entirely visible.
+// Active during the unsheathe + resheathe (when the blade overlaps the bore); OFF
+// during the display, where the blade is fully drawn and must be entirely visible.
 const CLIP_DRAW_CLEAR = 0.3 // p ≤ this: clip ON (covers the unsheathe, blade clears by 0.2)
-const CLIP_RESHEATHE = 0.7 // p ≥ this: clip ON again (scabbard back home, blade slides in)
+const CLIP_RESHEATHE = 0.62 // p ≥ this: clip ON again (scabbard back home, blade slides in)
 
 /* ---- Damping (higher = snappier, lower = floatier). The soul of the feel. - */
 const OBJ_DAMP = 3.4 // sword / scabbard position easing
@@ -76,19 +77,14 @@ const plateau = (p: number, a: number, b: number, c: number, d: number) =>
 const damp = THREE.MathUtils.damp
 
 type Axes = {
-  sword: THREE.Object3D
+  sword: THREE.Object3D // blade node — driven by the built-in clip (we never set it directly)
   scabbard: THREE.Object3D
-  sword0: THREE.Vector3 // authored (sheathed) node positions, in node-parent (root) space
-  scab0: THREE.Vector3
-  swordQuat0: THREE.Quaternion // authored blade orientation — arc rotation composes onto this
-  scabQuat0: THREE.Quaternion // authored scabbard orientation — co-rotation composes onto this
-  pivot: THREE.Vector3 // centre of curvature (root space) — the blade sweeps about this
-  rotAxis: THREE.Vector3 // unit; +angle about it draws the blade OUT along its arc
-  radius: number // sori curvature radius (root space) — arc length = angle × radius
-  drawAxis: THREE.Vector3 // unit, points OUT through the scabbard mouth (toward handle)
+  scab0: THREE.Vector3 // authored (sheathed) scabbard position, in node-parent (root) space
+  scabQuat0: THREE.Quaternion // authored scabbard orientation
   perpAxis: THREE.Vector3 // unit, perpendicular — drops scabbard below blade in the display
-  displayQuat: THREE.Quaternion // orientation that lays the blade horizontal, flat to camera
-  len: number // blade length in NODE/root space — the unit for all motion distances
+  displayQuatRest: THREE.Quaternion // lays the SHEATHED blade horizontal; composed with the
+  //                                   clip's end rotation at runtime to lay the DRAWN blade flat
+  len: number // blade length in NODE/root space — the unit for the scabbard drop
   center: THREE.Vector3 // model center in SCENE space — for framing
   maxDim: number // model size in SCENE space — for framing
   mouthLocal: THREE.Vector3 // mouth point in the scabbard node's LOCAL frame (clip anchor)
@@ -99,21 +95,6 @@ type Axes = {
  *  Derive the draw axis + display orientation straight from the mesh geometry.
  *  Robust to the model's diagonal pose; uses no world-axis assumptions.
  * -------------------------------------------------------------------------- */
-// Solve a 3×3 linear system M·x = r by Cramer's rule (for the circle fit).
-function solve3(
-  a: number, b: number, c: number,
-  d: number, e: number, f: number,
-  g: number, h: number, i: number,
-  j: number, k: number, l: number
-): [number, number, number] {
-  const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
-  if (Math.abs(det) < 1e-9) return [0, 0, 0]
-  const x = j * (e * i - f * h) - b * (k * i - f * l) + c * (k * h - e * l)
-  const y = a * (k * i - f * l) - j * (d * i - f * g) + c * (d * l - k * g)
-  const z = a * (e * l - k * h) - b * (d * l - k * g) + j * (d * h - e * g)
-  return [x / det, y / det, z / det]
-}
-
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
 const hasMeshDescendant = (o: THREE.Object3D) => {
   let has = false
@@ -230,7 +211,6 @@ function deriveAxes(scene: THREE.Object3D): Axes {
   const mouth = (mouthAtHigh ? mouthCenter : tipCenter).clone()
 
   // Blade face normal = the sword's thinnest extent, oriented toward camera (+Z).
-  // The sori curves in the broad plane, so the draw is a rotation about this axis.
   const ex = smx.x - smn.x, ey = smx.y - smn.y, ez = smx.z - smn.z
   const faceNormal = new THREE.Vector3(
     ex <= ey && ex <= ez ? 1 : 0,
@@ -239,60 +219,17 @@ function deriveAxes(scene: THREE.Object3D): Axes {
   )
   if (faceNormal.dot(new THREE.Vector3(0, 0, 1)) < 0) faceNormal.negate()
 
-  // --- Sori (curvature): fit a circular arc to the bore centerline -----------
-  // Sample the centerline by binning scabbard verts along the rough axis and
-  // taking each slice's centroid → a polyline that follows the curve.
-  const NB = 16
-  const binSum = Array.from({ length: NB }, () => new THREE.Vector3())
-  const binCnt = new Array<number>(NB).fill(0)
-  const span = cMax - cMin || 1
-  eachVertex(scabbard, (p) => {
-    let k = Math.floor(((p.dot(boreRough) - cMin) / span) * NB)
-    k = Math.max(0, Math.min(NB - 1, k))
-    binSum[k].add(p); binCnt[k]++
-  })
-  const centerline: THREE.Vector3[] = []
-  for (let k = 0; k < NB; k++) if (binCnt[k] > 0) centerline.push(binSum[k].multiplyScalar(1 / binCnt[k]))
-
-  // Fit a circle in the curve plane (u = along bore, v = in-plane perpendicular).
-  const cOrigin = new THREE.Vector3()
-  centerline.forEach((p) => cOrigin.add(p))
-  cOrigin.multiplyScalar(1 / centerline.length)
-  const u = boreRough.clone().addScaledVector(faceNormal, -boreRough.dot(faceNormal)).normalize()
-  const vv = new THREE.Vector3().crossVectors(faceNormal, u).normalize()
-  let Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0, Sxz = 0, Syz = 0, Sz = 0
-  for (const p of centerline) {
-    const x = p.clone().sub(cOrigin).dot(u)
-    const y = p.clone().sub(cOrigin).dot(vv)
-    const z = x * x + y * y
-    Sx += x; Sy += y; Sxx += x * x; Syy += y * y; Sxy += x * y
-    Sxz += x * z; Syz += y * z; Sz += z
-  }
-  const [Dc, Ec, Fc] = solve3(Sxx, Sxy, Sx, Sxy, Syy, Sy, Sx, Sy, centerline.length, Sxz, Syz, Sz)
-  const ca = Dc / 2, cb = Ec / 2
-  let radius = Math.sqrt(Math.max(1e-4, Fc + ca * ca + cb * cb))
-  if (!isFinite(radius) || radius < 0.5 * swordLen) radius = 50 * swordLen // degenerate ⇒ ~straight
-  const pivot = cOrigin.clone().addScaledVector(u, ca).addScaledVector(vv, cb)
-
-  // Rotation axis = face normal, signed so a POSITIVE angle sweeps OUT the mouth.
-  const rotAxis = faceNormal.clone()
-  const tan = new THREE.Vector3().crossVectors(rotAxis, mouth.clone().sub(pivot))
-  if (tan.dot(drawAxis) < 0) rotAxis.negate()
-  console.log('[katana:arc]', JSON.stringify({ radius: +radius.toFixed(2), len: +swordLen.toFixed(2), ratio: +(radius / swordLen).toFixed(2), drawAngleDeg: +(THREE.MathUtils.radToDeg(DRAW_DIST * swordLen / radius)).toFixed(1) }))
-
-  // Rest blade basis: e1=along blade, e3=face normal. perpAxis (screen-DOWN) is
-  // rotated into the drawn frame at runtime to drop the scabbard below the blade.
+  // Rest blade basis: e1=along blade, e3=face normal. perpAxis (screen-DOWN) drops
+  // the scabbard below the blade (rotated into the drawn frame at runtime).
   const e1 = drawAxis.clone()
   const e3 = faceNormal.clone().addScaledVector(e1, -faceNormal.dot(e1)).normalize()
+  const e2 = new THREE.Vector3().crossVectors(e3, e1).normalize()
   const perpAxis = new THREE.Vector3().crossVectors(e1, e3).normalize()
 
-  // displayQuat lays the DRAWN blade horizontal. During the display the blade is
-  // rotated by the full draw angle, so build the basis from the drawn long-axis.
-  const fullAngle = (DRAW_DIST * swordLen) / radius
-  const e1d = drawAxis.clone().applyAxisAngle(rotAxis, fullAngle)
-  const e2d = new THREE.Vector3().crossVectors(e3, e1d).normalize()
-  const basis = new THREE.Matrix4().makeBasis(e1d, e2d, e3).transpose()
-  const displayQuat = new THREE.Quaternion().setFromRotationMatrix(basis)
+  // displayQuatRest lays the SHEATHED blade horizontal (flat to camera). At runtime
+  // we compose it with the clip's end rotation so the DRAWN blade ends up horizontal.
+  const basis = new THREE.Matrix4().makeBasis(e1, e2, e3).transpose()
+  const displayQuatRest = new THREE.Quaternion().setFromRotationMatrix(basis)
 
   // The mesh sits under an ancestor scale (~0.01 from FBX import). Motion uses
   // root-space distances (len), but FRAMING needs the model's true SCENE-space
@@ -306,18 +243,16 @@ function deriveAxes(scene: THREE.Object3D): Axes {
     smn2.min(c); smx2.max(c)
   }
 
-  // Capture the AUTHORED rest pose ONCE and stash it on the node, so re-deriving
-  // (StrictMode / HMR) after the blade has animated can never drift the rest pose.
-  type Rest = { p: THREE.Vector3; q: THREE.Quaternion }
-  const restOf = (o: THREE.Object3D): Rest => {
-    if (!o.userData.rest) o.userData.rest = { p: o.position.clone(), q: o.quaternion.clone() }
-    return o.userData.rest as Rest
+  // Capture the AUTHORED scabbard rest pose ONCE and stash it on the node, so
+  // re-deriving (StrictMode / HMR) after it has animated can never drift the rest.
+  // (The blade's rest comes from the clip at time 0 — we never capture it here.)
+  if (!scabbard.userData.rest) {
+    scabbard.userData.rest = { p: scabbard.position.clone(), q: scabbard.quaternion.clone() }
   }
-  const swordRest = restOf(sword)
-  const scabRest = restOf(scabbard)
+  const scabRest = scabbard.userData.rest as { p: THREE.Vector3; q: THREE.Quaternion }
 
   // Express the mouth point + bore tangent in the scabbard node's LOCAL frame, so the
-  // clip plane follows the scabbard's full transform (incl. the saya-biki rotation).
+  // clip plane follows the scabbard's full transform (translation + rotation).
   const scabRestInv = new THREE.Matrix4().compose(scabRest.p, scabRest.q, scabbard.scale).invert()
   const mouthLocal = mouth.clone().applyMatrix4(scabRestInv)
   const drawAxisLocal = drawAxis.clone().transformDirection(scabRestInv).normalize()
@@ -325,16 +260,10 @@ function deriveAxes(scene: THREE.Object3D): Axes {
   return {
     sword,
     scabbard,
-    sword0: swordRest.p.clone(),
     scab0: scabRest.p.clone(),
-    swordQuat0: swordRest.q.clone(),
     scabQuat0: scabRest.q.clone(),
-    pivot,
-    rotAxis,
-    radius,
-    drawAxis,
     perpAxis,
-    displayQuat,
+    displayQuatRest,
     len: swordLen,
     center: smn2.clone().add(smx2).multiplyScalar(0.5),
     maxDim: Math.max(smx2.x - smn2.x, smx2.y - smn2.y, smx2.z - smn2.z) || swordLen,
@@ -349,8 +278,19 @@ function deriveAxes(scene: THREE.Object3D): Axes {
 
 const HERO_QUAT = new THREE.Quaternion() // identity = the authored diagonal hero pose
 
+// Data extracted from the built-in clip once it's loaded (sampled at its end pose).
+type ClipData = {
+  mixer: THREE.AnimationMixer
+  action: THREE.AnimationAction
+  duration: number
+  displayQuat: THREE.Quaternion // lays the CLIP-drawn blade horizontal
+  scabPos: THREE.Vector3 // scabbard target (concentric under the drawn blade + drop)
+  scabQuat: THREE.Quaternion
+}
+
 function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
-  const { scene } = useGLTF(MODEL_URL)
+  const { scene, animations } = useGLTF(MODEL_URL)
+  const { actions, mixer } = useAnimations(animations, scene)
   const scroll = useScroll()
   const { size, gl } = useThree()
 
@@ -362,6 +302,9 @@ function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
 
   // Clip plane: starts "open" (constant huge ⇒ nothing clipped) until driven each frame.
   const clipPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(1, 0, 0), 1e9), [])
+
+  // Built-in clip, sampled for its end pose + the derived display/scabbard targets.
+  const clipRef = useRef<ClipData | null>(null)
 
   // Center + scale to fill the frame. Recomputes on resize.
   useLayoutEffect(() => {
@@ -392,61 +335,80 @@ function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
     })
   }, [axes, gl, clipPlane])
 
-  const scabDrop = useMemo(() => new THREE.Vector3(), [])
+  // Set up the built-in unsheathe clip: pause it (we scrub by scroll), and SAMPLE its
+  // end pose so the parallel layout + display orientation hand off with no jump.
+  useLayoutEffect(() => {
+    const action = actions[CLIP_NAME] ?? Object.values(actions)[0]
+    if (!action) return
+    action.play()
+    action.paused = true
+
+    const sword = axes.sword
+    const duration = action.getClip().duration
+
+    // Sample the blade's authored sheathed (t=0) and fully-drawn (t=end) poses.
+    action.time = 0; mixer.update(0)
+    const pos0 = sword.position.clone()
+    const quat0 = sword.quaternion.clone()
+    action.time = duration; mixer.update(0)
+    const posEnd = sword.position.clone()
+    const quatEnd = sword.quaternion.clone()
+    action.time = 0; mixer.update(0) // leave it sheathed
+
+    // deltaQuat = the rigid rotation the clip applies to the blade (root space).
+    const deltaQuat = quatEnd.clone().multiply(quat0.clone().invert())
+
+    // Display orientation: compose the rest-display with the clip rotation so the
+    // DRAWN blade ends up horizontal (poseRef·deltaQuat must equal displayQuatRest).
+    const displayQuat = axes.displayQuatRest.clone().multiply(deltaQuat.clone().invert())
+
+    // Scabbard parallel target = apply the blade's rigid draw motion to the scabbard
+    // (g(x) = posEnd + deltaQuat·(x − pos0)) so it sits concentric UNDER the drawn
+    // blade, then add a perpendicular drop. Built straight from the clip end ⇒ no jump.
+    const scabPos = axes.scab0.clone().sub(pos0).applyQuaternion(deltaQuat).add(posEnd)
+    const dropDir = axes.perpAxis.clone().applyQuaternion(deltaQuat)
+    scabPos.addScaledVector(dropDir, SCAB_DROP * axes.len)
+    const scabQuat = deltaQuat.clone().multiply(axes.scabQuat0)
+
+    clipRef.current = { mixer, action, duration, displayQuat, scabPos, scabQuat }
+  }, [actions, mixer, axes])
+
   const qTarget = useMemo(() => new THREE.Quaternion(), [])
-  const rotQ = useMemo(() => new THREE.Quaternion(), [])
-  const rotQ2 = useMemo(() => new THREE.Quaternion(), [])
-  const bladeAngle = useRef(0)
+  const clipFrac = useRef(0)
   const scabPart = useRef(0)
-  const scabAngle = useRef(0)
   const mouthWorld = useMemo(() => new THREE.Vector3(), [])
   const axisWorld = useMemo(() => new THREE.Vector3(), [])
 
   useFrame((_, dt) => {
+    const cd = clipRef.current
+    if (!cd) return
     const p = scroll.offset
-    const { sword, scabbard, sword0, scab0, swordQuat0, scabQuat0, pivot, rotAxis, radius } = axes
-    const { perpAxis, displayQuat, len, mouthLocal, drawAxisLocal } = axes
+    const { scabbard, scab0, scabQuat0, mouthLocal, drawAxisLocal } = axes
 
-    const slideOut = plateau(p, DRAW.in, DRAW.out, DRAW.backIn, DRAW.backOut)
+    // UNSHEATHE: scrub the built-in clip by scroll (damped). 0→0.2 out, 0.62→0.8 in.
+    const fracTarget = plateau(p, CLIP.in, CLIP.out, CLIP.backIn, CLIP.backOut)
+    clipFrac.current = damp(clipFrac.current, fracTarget, OBJ_DAMP, dt)
+    cd.action.time = clipFrac.current * cd.duration
+    cd.mixer.update(0) // applies the blade pose for this clip time
+
+    // SCABBARD: glide from rest to the parallel target (under the drawn blade + drop).
     const part = plateau(p, PART.in, PART.out, PART.backIn, PART.backOut)
-    const poseAmt = plateau(p, POSE.in, POSE.out, POSE.backIn, POSE.backOut)
-    const fullAngle = (DRAW_DIST * len) / radius
-
-    // SWORD: sweep out along the blade's CURVE by rotating the group about the sori
-    // pivot (centre of curvature). Damp the ANGLE so it follows the curve. Rigid:
-    // angle=0 ⇒ exactly the authored sheathed pose (position + orientation).
-    bladeAngle.current = damp(bladeAngle.current, slideOut * fullAngle, OBJ_DAMP, dt)
-    rotQ.setFromAxisAngle(rotAxis, bladeAngle.current)
-    sword.position.copy(sword0).sub(pivot).applyQuaternion(rotQ).add(pivot)
-    sword.quaternion.copy(rotQ).multiply(swordQuat0)
-
-    // SCABBARD rotation about the SAME pivot, two complementary terms:
-    //  • parallel co-rotation (part): glides up the arc to sit collinear with the
-    //    drawn blade, reaching its angle at part=1 ⇒ concentric, then drops below.
-    //  • SAYA BIKI (saya-biki): during the draw/resheathe (part≈0) the sheath is
-    //    pulled BACK opposite the blade so the mouth tracks the blade's exit and the
-    //    two stay one continuous curve. It is gated by (1-part), so it fades out as
-    //    the parallel layout takes over and is zero at rest and in the display.
-    const scabTarget = part * fullAngle - slideOut * (1 - part) * SAYA_BIKI * fullAngle
-    scabAngle.current = damp(scabAngle.current, scabTarget, OBJ_DAMP, dt)
     scabPart.current = damp(scabPart.current, part, OBJ_DAMP, dt)
-    rotQ2.setFromAxisAngle(rotAxis, scabAngle.current)
-    scabbard.position.copy(scab0).sub(pivot).applyQuaternion(rotQ2).add(pivot)
-    scabDrop.copy(perpAxis).applyQuaternion(rotQ2).multiplyScalar(SCAB_DROP * len * scabPart.current)
-    scabbard.position.add(scabDrop)
-    scabbard.quaternion.copy(rotQ2).multiply(scabQuat0)
+    const sp = scabPart.current
+    scabbard.position.lerpVectors(scab0, cd.scabPos, sp)
+    scabbard.quaternion.slerpQuaternions(scabQuat0, cd.scabQuat, sp)
 
     // POSE: rotate the whole assembly from diagonal hero toward horizontal display.
-    qTarget.slerpQuaternions(HERO_QUAT, displayQuat, poseAmt)
+    const poseAmt = plateau(p, POSE.in, POSE.out, POSE.backIn, POSE.backOut)
+    qTarget.slerpQuaternions(HERO_QUAT, cd.displayQuat, poseAmt)
     poseRef.current.quaternion.slerp(qTarget, 1 - Math.exp(-POSE_DAMP * dt))
 
-    // CLIP: hide the blade still inside the sheath. The plane sits at the scabbard
-    // mouth with its normal along the bore tangent, so the in-bore half-space is
-    // clipped. Anchored in the scabbard's LOCAL frame ⇒ it follows the scabbard's
-    // full transform (translation + saya-biki rotation). OFF during the display.
+    // CLIP PLANE: hide the blade still inside the sheath. Sits at the scabbard mouth,
+    // normal along the bore tangent; anchored in the scabbard's LOCAL frame so it
+    // follows the scabbard. OFF during the fully-drawn display.
     const clipOn = p <= CLIP_DRAW_CLEAR || p >= CLIP_RESHEATHE
     if (clipOn) {
-      scabbard.updateWorldMatrix(true, false) // sync after this frame's transform
+      scabbard.updateWorldMatrix(true, false)
       mouthWorld.copy(mouthLocal).applyMatrix4(scabbard.matrixWorld)
       axisWorld.copy(drawAxisLocal).transformDirection(scabbard.matrixWorld).normalize()
       clipPlane.setFromNormalAndCoplanarPoint(axisWorld, mouthWorld)
