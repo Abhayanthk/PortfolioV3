@@ -1,28 +1,30 @@
-:root {
-  color-scheme: dark;
+@import 'tailwindcss';
+
+/* Design tokens → generate utilities like bg-ink, text-washi, text-gold,
+   font-display, font-mono. All component styling lives in Tailwind classes in JSX. */
+@theme {
+  --color-ink: #0a0a0a;
+  --color-washi: #ece8e1;
+  --color-gold: #c8a24a;
+  --font-display: 'Archivo', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  width: 100%;
-  height: 100%;
-  background: #0a0a0a;
-  overflow: hidden;
-}
-
-body {
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-  -webkit-font-smoothing: antialiased;
-}
-
-canvas {
-  display: block;
-  touch-action: none;
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background: var(--color-ink);
+    color: var(--color-washi);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  canvas {
+    display: block;
+    touch-action: none;
+  }
 }

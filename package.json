@@ -16,11 +16,13 @@
     "three": "^0.169.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/three": "^0.169.0",
     "@vitejs/plugin-react": "^4.3.3",
     "puppeteer": "^25.1.0",
+    "tailwindcss": "^4.3.1",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
   }

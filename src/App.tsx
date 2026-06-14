@@ -1,4 +1,4 @@
-import { Suspense, useLayoutEffect, useMemo, useRef } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Environment, Loader, ScrollControls, useAnimations, useGLTF, useScroll } from '@react-three/drei'
 import * as THREE from 'three'
@@ -31,6 +31,11 @@ const TARGET_FILL = 0.82 // model fills ~82% of the smaller viewport axis at her
 const HERO_OFF = new THREE.Vector3(0.0, 0.05, 5.2) // camera offset from focus — close
 const DISPLAY_OFF = new THREE.Vector3(0.0, -0.1, 7.4) // pulled back to reveal the parallel layout
 const DRIFT_DIR = new THREE.Vector3(1.25, 0.0, 0.0) // lateral camera drift across the blade (hold)
+// Hero zoom: at scroll 0 the camera is pushed IN (×HERO_ZOOM of the offset) so the
+// sheathed katana cuts diagonally across the frame, then eases back to the normal
+// framing as the unsheathe begins. < 1 = closer/bigger.
+const HERO_ZOOM = 0.66
+const ZOOM = { in: 0.0, out: 0.13 } // scroll range over which the zoom releases to normal
 
 /* ---- Scroll breakpoints (progress 0 → 1) ---------------------------------- */
 //  0.00–0.20  unsheathe (built-in clip)  |  0.20–0.32  rotate toward horizontal
@@ -444,8 +449,10 @@ function Rig({ axesRef, progressRef }: DriveProps) {
 
     const frameAmt = plateau(p, FRAME.in, FRAME.out, FRAME.backIn, FRAME.backOut)
     const driftAmt = plateau(p, DRIFT.a, DRIFT.b, DRIFT.c, DRIFT.d)
+    // Hero zoom: push IN at scroll 0, ease back to the normal offset as the draw starts.
+    const zoom = THREE.MathUtils.lerp(HERO_ZOOM, 1, smoothstep(ZOOM.in, ZOOM.out, p))
 
-    off.copy(HERO_OFF).lerp(DISPLAY_OFF, frameAmt).addScaledVector(DRIFT_DIR, driftAmt)
+    off.copy(HERO_OFF).lerp(DISPLAY_OFF, frameAmt).multiplyScalar(zoom).addScaledVector(DRIFT_DIR, driftAmt)
     camera.position.copy(focus).add(off)
     camera.lookAt(focus)
   })
@@ -498,39 +505,140 @@ function Scene({ axesRef, progressRef }: DriveProps) {
 }
 
 /* ============================================================================
- *  App — Canvas, tone mapping (UNCHANGED), scroll container
+ *  App — layered hero: sakura backdrop · transparent 3D canvas · HTML HUD
  * ========================================================================== */
+
+// Soft FEATHERED hexagon mask (blurred polygon ⇒ edges dissolve, not a hard border).
+const HEX_SVG =
+  "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 240'>" +
+  "<filter id='f' filterUnits='userSpaceOnUse' x='-50' y='-50' width='300' height='340'>" +
+  "<feGaussianBlur stdDeviation='16'/></filter>" +
+  "<polygon points='100,26 168,72 168,168 100,214 32,168 32,72' fill='white' filter='url(#f)'/></svg>"
+const HEX_MASK: React.CSSProperties = {
+  WebkitMaskImage: `url("data:image/svg+xml,${encodeURIComponent(HEX_SVG)}")`,
+  maskImage: `url("data:image/svg+xml,${encodeURIComponent(HEX_SVG)}")`,
+  WebkitMaskSize: '100% 100%',
+  maskSize: '100% 100%',
+  WebkitMaskRepeat: 'no-repeat',
+  maskRepeat: 'no-repeat',
+}
+
+// Reusable class fragments (kept DRY; all styling is Tailwind utilities).
+const MONO = 'font-mono text-[0.7rem] tracking-[0.22em] uppercase text-washi/50'
+const PILL = 'font-mono text-[0.64rem] tracking-[0.13em] uppercase px-3 py-1.5 rounded-full border'
 
 export default function App() {
   const axesRef = useRef<Axes | null>(null)
   const progressRef = useRef(0)
 
+  const sakuraRef = useRef<HTMLDivElement>(null)
+  const wordmarkRef = useRef<HTMLHeadingElement>(null)
+  const hudRef = useRef<HTMLDivElement>(null)
+  const pctRef = useRef<HTMLSpanElement>(null)
+
+  // Drive the hero's fade + the live scroll % off the ONE shared progress value.
+  useEffect(() => {
+    let raf = 0
+    const tick = () => {
+      const p = progressRef.current
+      const textFade = 1 - smoothstep(0.02, 0.16, p) // wordmark + HUD fade out
+      const treeFade = 1 - smoothstep(0.08, 0.42, p) // sakura lingers a touch longer
+      if (hudRef.current) hudRef.current.style.opacity = `${textFade}`
+      if (wordmarkRef.current) wordmarkRef.current.style.opacity = `${0.15 * textFade}`
+      if (sakuraRef.current) sakuraRef.current.style.opacity = `${0.55 * treeFade}`
+      if (pctRef.current) pctRef.current.textContent = `${Math.round(clamp01(p) * 100)}`.padStart(3, '0')
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
   return (
     <>
+      {/* Layer 0 — backdrop: sakura tree + anchor wordmark, BEHIND the canvas. */}
+      <div className="fixed inset-0 z-0 overflow-hidden pointer-events-none">
+        <div
+          ref={sakuraRef}
+          className="absolute left-1/2 top-[46%] -translate-x-1/2 -translate-y-1/2 w-[min(62vh,88vw)] h-[min(93vh,132vw)] bg-[url('/Sakura_tree_bg.png')] bg-contain bg-center bg-no-repeat mix-blend-screen"
+          style={{ opacity: 0.55, ...HEX_MASK }}
+        />
+        <h1
+          ref={wordmarkRef}
+          className="absolute inset-x-0 -bottom-[1.5vh] text-center font-display font-black leading-[0.8] tracking-[-0.04em] whitespace-nowrap text-washi select-none text-[clamp(3.5rem,17.5vw,17rem)]"
+          style={{ opacity: 0.15 }}
+        >
+          Abhayanth K
+        </h1>
+      </div>
+
+      {/* Layer 1 — the 3D scene (transparent so the backdrop shows through). */}
       <Canvas
+        style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', zIndex: 1 }}
         dpr={[1, 2]}
         gl={{
+          alpha: true,
           antialias: true,
           toneMapping: THREE.ACESFilmicToneMapping,
           toneMappingExposure: 1.05,
         }}
         camera={{ position: HERO_OFF.toArray(), fov: FOV, near: 0.1, far: 100 }}
       >
-        <color attach="background" args={['#0a0a0a']} />
-
         <Suspense fallback={null}>
-          {/* pages = scroll length. Progress reads the RAW DOM scroll directly and is
-              the ONLY smoother, so ScrollControls' own damping is left at default. */}
           <ScrollControls pages={4}>
             <Scene axesRef={axesRef} progressRef={progressRef} />
           </ScrollControls>
         </Suspense>
       </Canvas>
 
-      {/* Simple loading state (DOM overlay, fades out when the model is ready). */}
+      {/* Layer 2 — HUD instrument panel, ABOVE the canvas (fades with scroll). */}
+      <div ref={hudRef} className="fixed inset-0 z-10 pointer-events-none text-washi">
+        {/* top-left — monogram + tagline */}
+        <div className="absolute top-6 left-6 md:top-10 md:left-10">
+          <div className="text-2xl leading-none text-gold mb-3.5">鍛</div>
+          <div className="font-display font-bold leading-[1.06] tracking-[-0.015em] text-[clamp(1rem,1.65vw,1.5rem)]">
+            Building software.
+            <br />
+            Sharpening algorithms.
+          </div>
+        </div>
+
+        {/* top-center — build tag */}
+        <div className={`absolute top-6 md:top-10 left-1/2 -translate-x-1/2 ${MONO}`}>V_1.0.0</div>
+
+        {/* top-right — live scroll % + nav pills */}
+        <div className="absolute top-6 right-6 md:top-10 md:right-10 flex flex-col items-end gap-4">
+          <div className="font-mono text-[0.72rem] tracking-[0.2em] text-gold">
+            <span ref={pctRef}>000</span>%
+          </div>
+          <nav className="flex gap-1.5">
+            <span className={`${PILL} border-gold/50 text-gold`}>About</span>
+            <span className={`${PILL} border-washi/15 text-washi/70`}>Projects</span>
+            <span className={`${PILL} border-washi/15 text-washi/70`}>CP</span>
+            <span className={`${PILL} border-washi/15 text-washi/70`}>Contact</span>
+          </nav>
+        </div>
+
+        {/* bottom-left — role descriptor */}
+        <div className={`absolute bottom-6 left-6 md:bottom-10 md:left-10 ${MONO}`}>
+          SDE / COMPETITIVE PROGRAMMER
+        </div>
+
+        {/* bottom-right — signature stat (placeholder text — edit me) */}
+        <div className={`absolute bottom-6 right-6 md:bottom-10 md:right-10 text-right ${MONO}`}>
+          TLE ELIMINATORS · LVL 4 <span className="text-gold ml-1">鍛</span>
+        </div>
+
+        {/* bottom-center — scroll cue */}
+        <div className="absolute bottom-6 md:bottom-10 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
+          <span className={MONO}>scroll</span>
+          <span className="block w-px h-9 bg-linear-to-b from-washi/55 to-transparent" />
+        </div>
+      </div>
+
+      {/* Loading state (DOM overlay, fades out when the model is ready). */}
       <Loader
         containerStyles={{ background: '#0a0a0a' }}
-        barStyles={{ background: '#c9a25e', height: '2px' }}
+        barStyles={{ background: '#c8a24a', height: '2px' }}
         dataStyles={{
           color: '#8a8a8a',
           fontSize: '11px',
