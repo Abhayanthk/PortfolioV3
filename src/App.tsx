@@ -43,6 +43,7 @@ const DRIFT = { a: 0.46, b: 0.52, c: 0.58, d: 0.64 } // hold drift bump
 /* ---- Object motion (as FRACTIONS of blade length, so they self-scale) ----- */
 const DRAW_DIST = 0.95 // arc length of the full draw, as a fraction of blade length
 const SCAB_DROP = 0.32 // scabbard offset perpendicular to the blade (drops it below)
+const SAYA_BIKI = 0.45 // sheath pull-back during the draw, as a fraction of the blade's draw angle
 
 /* ---- Clip plane: hides the blade portion still inside the sheath ----------- */
 // Active during the draw + resheathe (when the blade overlaps the bore); OFF during
@@ -90,8 +91,8 @@ type Axes = {
   len: number // blade length in NODE/root space — the unit for all motion distances
   center: THREE.Vector3 // model center in SCENE space — for framing
   maxDim: number // model size in SCENE space — for framing
-  mouth: THREE.Vector3 // scabbard mouth point (root space, at rest) — clip-plane anchor
-  root: THREE.Object3D // RootNode — maps root space → world for the clip plane
+  mouthLocal: THREE.Vector3 // mouth point in the scabbard node's LOCAL frame (clip anchor)
+  drawAxisLocal: THREE.Vector3 // bore tangent at the mouth, in the scabbard's LOCAL frame
 }
 
 /* ----------------------------------------------------------------------------
@@ -315,6 +316,12 @@ function deriveAxes(scene: THREE.Object3D): Axes {
   const swordRest = restOf(sword)
   const scabRest = restOf(scabbard)
 
+  // Express the mouth point + bore tangent in the scabbard node's LOCAL frame, so the
+  // clip plane follows the scabbard's full transform (incl. the saya-biki rotation).
+  const scabRestInv = new THREE.Matrix4().compose(scabRest.p, scabRest.q, scabbard.scale).invert()
+  const mouthLocal = mouth.clone().applyMatrix4(scabRestInv)
+  const drawAxisLocal = drawAxis.clone().transformDirection(scabRestInv).normalize()
+
   return {
     sword,
     scabbard,
@@ -331,8 +338,8 @@ function deriveAxes(scene: THREE.Object3D): Axes {
     len: swordLen,
     center: smn2.clone().add(smx2).multiplyScalar(0.5),
     maxDim: Math.max(smx2.x - smn2.x, smx2.y - smn2.y, smx2.z - smn2.z) || swordLen,
-    mouth,
-    root,
+    mouthLocal,
+    drawAxisLocal,
   }
 }
 
@@ -391,14 +398,14 @@ function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
   const rotQ2 = useMemo(() => new THREE.Quaternion(), [])
   const bladeAngle = useRef(0)
   const scabPart = useRef(0)
-  const mouthRoot = useMemo(() => new THREE.Vector3(), [])
+  const scabAngle = useRef(0)
   const mouthWorld = useMemo(() => new THREE.Vector3(), [])
   const axisWorld = useMemo(() => new THREE.Vector3(), [])
 
   useFrame((_, dt) => {
     const p = scroll.offset
     const { sword, scabbard, sword0, scab0, swordQuat0, scabQuat0, pivot, rotAxis, radius } = axes
-    const { drawAxis, perpAxis, displayQuat, len, mouth, root } = axes
+    const { perpAxis, displayQuat, len, mouthLocal, drawAxisLocal } = axes
 
     const slideOut = plateau(p, DRAW.in, DRAW.out, DRAW.backIn, DRAW.backOut)
     const part = plateau(p, PART.in, PART.out, PART.backIn, PART.backOut)
@@ -413,14 +420,19 @@ function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
     sword.position.copy(sword0).sub(pivot).applyQuaternion(rotQ).add(pivot)
     sword.quaternion.copy(rotQ).multiply(swordQuat0)
 
-    // SCABBARD: glide UP THE ARC (co-rotate about the SAME pivot) so it stays
-    // collinear with the drawn blade, reaching the blade's angle at part=1 ⇒
-    // concentric, then a perpendicular drop separates them into the parallel layout.
+    // SCABBARD rotation about the SAME pivot, two complementary terms:
+    //  • parallel co-rotation (part): glides up the arc to sit collinear with the
+    //    drawn blade, reaching its angle at part=1 ⇒ concentric, then drops below.
+    //  • SAYA BIKI (saya-biki): during the draw/resheathe (part≈0) the sheath is
+    //    pulled BACK opposite the blade so the mouth tracks the blade's exit and the
+    //    two stay one continuous curve. It is gated by (1-part), so it fades out as
+    //    the parallel layout takes over and is zero at rest and in the display.
+    const scabTarget = part * fullAngle - slideOut * (1 - part) * SAYA_BIKI * fullAngle
+    scabAngle.current = damp(scabAngle.current, scabTarget, OBJ_DAMP, dt)
     scabPart.current = damp(scabPart.current, part, OBJ_DAMP, dt)
-    const sp = scabPart.current
-    rotQ2.setFromAxisAngle(rotAxis, sp * fullAngle)
+    rotQ2.setFromAxisAngle(rotAxis, scabAngle.current)
     scabbard.position.copy(scab0).sub(pivot).applyQuaternion(rotQ2).add(pivot)
-    scabDrop.copy(perpAxis).applyQuaternion(rotQ2).multiplyScalar(SCAB_DROP * len * sp)
+    scabDrop.copy(perpAxis).applyQuaternion(rotQ2).multiplyScalar(SCAB_DROP * len * scabPart.current)
     scabbard.position.add(scabDrop)
     scabbard.quaternion.copy(rotQ2).multiply(scabQuat0)
 
@@ -429,14 +441,14 @@ function Katana({ axesRef }: { axesRef: React.MutableRefObject<Axes | null> }) {
     poseRef.current.quaternion.slerp(qTarget, 1 - Math.exp(-POSE_DAMP * dt))
 
     // CLIP: hide the blade still inside the sheath. The plane sits at the scabbard
-    // mouth (following the scabbard) with its normal along the draw axis, so the
-    // in-bore half-space is clipped. Toggled OFF during the fully-drawn display.
+    // mouth with its normal along the bore tangent, so the in-bore half-space is
+    // clipped. Anchored in the scabbard's LOCAL frame ⇒ it follows the scabbard's
+    // full transform (translation + saya-biki rotation). OFF during the display.
     const clipOn = p <= CLIP_DRAW_CLEAR || p >= CLIP_RESHEATHE
     if (clipOn) {
-      // Mouth follows the scabbard's live translation (root space), then → world.
-      mouthRoot.copy(scabbard.position).sub(scab0).add(mouth).applyMatrix4(root.matrixWorld)
-      mouthWorld.copy(mouthRoot)
-      axisWorld.copy(drawAxis).transformDirection(root.matrixWorld).normalize()
+      scabbard.updateWorldMatrix(true, false) // sync after this frame's transform
+      mouthWorld.copy(mouthLocal).applyMatrix4(scabbard.matrixWorld)
+      axisWorld.copy(drawAxisLocal).transformDirection(scabbard.matrixWorld).normalize()
       clipPlane.setFromNormalAndCoplanarPoint(axisWorld, mouthWorld)
     } else {
       clipPlane.constant = 1e9 // open: nothing clipped
