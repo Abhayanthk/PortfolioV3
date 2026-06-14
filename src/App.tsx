@@ -37,6 +37,18 @@ const DRIFT_DIR = new THREE.Vector3(1.25, 0.0, 0.0) // lateral camera drift acro
 const HERO_ZOOM = 0.5 // tighter, corner-to-corner hero framing
 const ZOOM = { in: 0.0, out: 0.13 } // scroll range over which the zoom releases to normal
 
+// HERO REST FRAMING (scroll 0): roll the katana so the handle/guard sits UPPER-RIGHT
+// with the scabbard running off toward the lower-left, then aim the camera there.
+// All of this BLENDS OUT to the normal choreography framing by HERO_BLEND.out — the
+// unsheathe/parallel/resheathe phases are untouched.
+const HERO_BLEND = { in: 0.0, out: 0.16 }
+const HERO_ROLL_DEG = -104 // in-plane roll (about the view axis) at rest; handle → upper-right
+const HANDLE_SHIFT = 0.45 // world units from the scabbard mouth toward the handle (focal point)
+const HERO_AIM_X = 0.85 // push the focal point toward the RIGHT of the frame (world units)
+const HERO_AIM_Y = 0.55 // push the focal point UP in the frame (world units)
+const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
+const WORLD_UP = new THREE.Vector3(0, 1, 0)
+
 /* ---- Scroll breakpoints (progress 0 → 1) ---------------------------------- */
 //  0.00–0.20  unsheathe (built-in clip)  |  0.20–0.32  rotate toward horizontal
 //  0.32–0.48  scabbard glides parallel   |  0.48–0.54  hold + camera drift
@@ -299,11 +311,18 @@ function Katana({ axesRef, progressRef }: DriveProps) {
   const { actions, mixer } = useAnimations(animations, scene)
   const { size, gl } = useThree()
 
+  const heroRef = useRef<THREE.Group>(null!)
   const poseRef = useRef<THREE.Group>(null!)
   const fitRef = useRef<THREE.Group>(null!)
 
   const axes = useMemo(() => deriveAxes(scene), [scene])
   axesRef.current = axes
+
+  // Hero rest roll (blends to identity by HERO_BLEND.out — choreography untouched).
+  const heroRollQuat = useMemo(
+    () => new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(HERO_ROLL_DEG)),
+    []
+  )
 
   // Clip plane: starts "open" (constant huge ⇒ nothing clipped) until driven each frame.
   const clipPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(1, 0, 0), 1e9), [])
@@ -403,6 +422,11 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     const poseAmt = plateau(p, POSE.in, POSE.out, POSE.backIn, POSE.backOut)
     poseRef.current.quaternion.slerpQuaternions(HERO_QUAT, cd.displayQuat, poseAmt)
 
+    // HERO ROLL: at rest the whole assembly is rolled so the handle reads upper-right;
+    // eases to identity as you scroll in, handing off to the untouched choreography.
+    const heroAmt = 1 - smoothstep(HERO_BLEND.in, HERO_BLEND.out, p)
+    heroRef.current.quaternion.slerpQuaternions(HERO_QUAT, heroRollQuat, heroAmt)
+
     // CLIP PLANE: hide the blade still inside the sheath. Sits at the scabbard mouth,
     // normal along the bore tangent; anchored in the scabbard's LOCAL frame so it
     // follows the scabbard. OFF during the fully-drawn display.
@@ -418,9 +442,11 @@ function Katana({ axesRef, progressRef }: DriveProps) {
   })
 
   return (
-    <group ref={poseRef}>
-      <group ref={fitRef}>
-        <primitive object={scene} />
+    <group ref={heroRef}>
+      <group ref={poseRef}>
+        <group ref={fitRef}>
+          <primitive object={scene} />
+        </group>
       </group>
     </group>
   )
@@ -435,8 +461,11 @@ function Rig({ axesRef, progressRef }: DriveProps) {
   const { camera } = useThree()
 
   const focus = useMemo(() => new THREE.Vector3(), [])
+  const aim = useMemo(() => new THREE.Vector3(), [])
+  const heroAim = useMemo(() => new THREE.Vector3(), [])
   const pa = useMemo(() => new THREE.Vector3(), [])
   const pb = useMemo(() => new THREE.Vector3(), [])
+  const drawW = useMemo(() => new THREE.Vector3(), [])
   const off = useMemo(() => new THREE.Vector3(), [])
 
   useFrame(() => {
@@ -450,14 +479,26 @@ function Rig({ axesRef, progressRef }: DriveProps) {
     axes.scabbard.getWorldPosition(pb)
     focus.copy(pa).add(pb).multiplyScalar(0.5)
 
+    // HERO aim: target the guard/handle (scabbard mouth + a shift toward the handle),
+    // pushed toward the UPPER-RIGHT of the frame. Blends out into the normal focus.
+    const heroAmt = 1 - smoothstep(HERO_BLEND.in, HERO_BLEND.out, p)
+    const sc = axes.scabbard
+    sc.updateWorldMatrix(true, false)
+    heroAim.copy(axes.mouthLocal).applyMatrix4(sc.matrixWorld)
+    drawW.copy(axes.drawAxisLocal).transformDirection(sc.matrixWorld).normalize()
+    heroAim.addScaledVector(drawW, HANDLE_SHIFT)
+    // Aim BELOW-LEFT of the focal point so it lands UPPER-RIGHT in frame.
+    heroAim.addScaledVector(WORLD_RIGHT, -HERO_AIM_X).addScaledVector(WORLD_UP, -HERO_AIM_Y)
+    aim.copy(focus).lerp(heroAim, heroAmt)
+
     const frameAmt = plateau(p, FRAME.in, FRAME.out, FRAME.backIn, FRAME.backOut)
     const driftAmt = plateau(p, DRIFT.a, DRIFT.b, DRIFT.c, DRIFT.d)
     // Hero zoom: push IN at scroll 0, ease back to the normal offset as the draw starts.
     const zoom = THREE.MathUtils.lerp(HERO_ZOOM, 1, smoothstep(ZOOM.in, ZOOM.out, p))
 
     off.copy(HERO_OFF).lerp(DISPLAY_OFF, frameAmt).multiplyScalar(zoom).addScaledVector(DRIFT_DIR, driftAmt)
-    camera.position.copy(focus).add(off)
-    camera.lookAt(focus)
+    camera.position.copy(aim).add(off)
+    camera.lookAt(aim)
   })
 
   return null
