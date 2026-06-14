@@ -34,7 +34,7 @@ const DRIFT_DIR = new THREE.Vector3(1.25, 0.0, 0.0) // lateral camera drift acro
 // Hero zoom: at scroll 0 the camera is pushed IN (×HERO_ZOOM of the offset) so the
 // sheathed katana cuts diagonally across the frame, then eases back to the normal
 // framing as the unsheathe begins. < 1 = closer/bigger.
-const HERO_ZOOM = 0.66
+const HERO_ZOOM = 0.5 // tighter, corner-to-corner hero framing
 const ZOOM = { in: 0.0, out: 0.13 } // scroll range over which the zoom releases to normal
 
 /* ---- Scroll breakpoints (progress 0 → 1) ---------------------------------- */
@@ -50,6 +50,7 @@ const DRIFT = { a: 0.46, b: 0.5, c: 0.52, d: 0.56 } // hold drift bump
 
 /* ---- Object motion -------------------------------------------------------- */
 const SCAB_DROP = 0.32 // scabbard offset perpendicular to the blade (fraction of blade length)
+const START_DRAWN = 0.12 // resting clip fraction at scroll 0 — opens mid-gesture, slightly drawn
 
 /* ---- Clip plane: hides the blade portion still inside the sheath ----------- */
 // Active during the unsheathe + resheathe (when the blade overlaps the bore); OFF
@@ -386,8 +387,10 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     const p = progressRef.current // the ONE smoothed progress — no per-element damping
     const { scabbard, scab0, scabQuat0, mouthLocal, drawAxisLocal } = axes
 
-    // UNSHEATHE: clip time is a pure function of p. 0→0.2 out, held, 0.62→0.8 in.
-    const frac = plateau(p, CLIP.in, CLIP.out, CLIP.backIn, CLIP.backOut)
+    // UNSHEATHE: clip time is a pure function of p. Rest (p=0) starts slightly drawn
+    // (START_DRAWN); 0→0.2 draws fully out, held, 0.62→0.8 returns to the rest fraction.
+    const ramp = plateau(p, CLIP.in, CLIP.out, CLIP.backIn, CLIP.backOut)
+    const frac = START_DRAWN + (1 - START_DRAWN) * ramp
     cd.action.time = frac * cd.duration
     cd.mixer.update(0) // applies the blade pose for this clip time
 
@@ -536,16 +539,21 @@ export default function App() {
   const hudRef = useRef<HTMLDivElement>(null)
   const pctRef = useRef<HTMLSpanElement>(null)
 
-  // Drive the hero's fade + the live scroll % off the ONE shared progress value.
+  // Drive the hero's fades + parallax + live scroll % off the ONE shared progress.
   useEffect(() => {
     let raf = 0
     const tick = () => {
       const p = progressRef.current
-      const textFade = 1 - smoothstep(0.02, 0.16, p) // wordmark + HUD fade out
+      const hudFade = 1 - smoothstep(0.02, 0.16, p) // tagline / nav / corners clear early
       const treeFade = 1 - smoothstep(0.08, 0.42, p) // sakura lingers a touch longer
-      if (hudRef.current) hudRef.current.style.opacity = `${textFade}`
-      if (wordmarkRef.current) wordmarkRef.current.style.opacity = `${0.15 * textFade}`
+      const nameFade = 1 - smoothstep(0.5, 0.64, p) // wordmark PERSISTS, fades only at the About beat
+      if (hudRef.current) hudRef.current.style.opacity = `${hudFade}`
       if (sakuraRef.current) sakuraRef.current.style.opacity = `${0.55 * treeFade}`
+      if (wordmarkRef.current) {
+        // Subtle parallax: drifts up slower than the scene; stays readable through the draw.
+        wordmarkRef.current.style.opacity = `${0.92 * nameFade}`
+        wordmarkRef.current.style.transform = `translateY(${-p * 0.12 * window.innerHeight}px)`
+      }
       if (pctRef.current) pctRef.current.textContent = `${Math.round(clamp01(p) * 100)}`.padStart(3, '0')
       raf = requestAnimationFrame(tick)
     }
@@ -555,20 +563,13 @@ export default function App() {
 
   return (
     <>
-      {/* Layer 0 — backdrop: sakura tree + anchor wordmark, BEHIND the canvas. */}
+      {/* Layer 0 — backdrop: sakura tree vignette, BEHIND the canvas. */}
       <div className="fixed inset-0 z-0 overflow-hidden pointer-events-none">
         <div
           ref={sakuraRef}
           className="absolute left-1/2 top-[46%] -translate-x-1/2 -translate-y-1/2 w-[min(62vh,88vw)] h-[min(93vh,132vw)] bg-[url('/Sakura_tree_bg.png')] bg-contain bg-center bg-no-repeat mix-blend-screen"
           style={{ opacity: 0.55, ...HEX_MASK }}
         />
-        <h1
-          ref={wordmarkRef}
-          className="absolute inset-x-0 -bottom-[1.5vh] text-center font-display font-black leading-[0.8] tracking-[-0.04em] whitespace-nowrap text-washi select-none text-[clamp(3.5rem,17.5vw,17rem)]"
-          style={{ opacity: 0.15 }}
-        >
-          Abhayanth K
-        </h1>
       </div>
 
       {/* Layer 1 — the 3D scene (transparent so the backdrop shows through). */}
@@ -589,6 +590,18 @@ export default function App() {
           </ScrollControls>
         </Suspense>
       </Canvas>
+
+      {/* Layer 1.5 — anchor wordmark ABOVE the canvas so the blade weaves BEHIND the
+          letters (name stays readable). Lifted off the bottom; persists with parallax. */}
+      <div className="fixed inset-0 z-[5] flex items-end justify-center pb-[14vh] pointer-events-none overflow-hidden">
+        <h1
+          ref={wordmarkRef}
+          className="font-display font-black leading-[0.8] tracking-[-0.04em] whitespace-nowrap text-washi select-none text-[clamp(3.5rem,17.5vw,17rem)]"
+          style={{ opacity: 0.92 }}
+        >
+          Abhayanth K
+        </h1>
+      </div>
 
       {/* Layer 2 — HUD instrument panel, ABOVE the canvas (fades with scroll). */}
       <div ref={hudRef} className="fixed inset-0 z-10 pointer-events-none text-washi">
@@ -623,9 +636,9 @@ export default function App() {
           SDE / COMPETITIVE PROGRAMMER
         </div>
 
-        {/* bottom-right — signature stat (placeholder text — edit me) */}
+        {/* bottom-right — signature stat */}
         <div className={`absolute bottom-6 right-6 md:bottom-10 md:right-10 text-right ${MONO}`}>
-          TLE ELIMINATORS · LVL 4 <span className="text-gold ml-1">鍛</span>
+          CODEFORCES SPECIALIST <span className="text-gold ml-1">鍛</span>
         </div>
 
         {/* bottom-center — scroll cue */}
