@@ -50,15 +50,20 @@ const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 
 /* ---- Scroll breakpoints (progress 0 → 1) ---------------------------------- */
-//  0.00–0.20  unsheathe (built-in clip)  |  0.20–0.32  rotate toward horizontal
-//  0.32–0.48  scabbard glides parallel   |  0.48–0.54  hold + camera drift
-//  0.54–0.62  scabbard returns           |  0.62–0.80  resheathe (clip reversed)
-//  0.80–1.00  camera returns to hero
-const CLIP = { in: 0.0, out: 0.2, backIn: 0.62, backOut: 0.8 } // scroll→clip-time ramp
-const POSE = { in: 0.2, out: 0.32, backIn: 0.8, backOut: 1.0 } // diagonal→horizontal ramp
-const PART = { in: 0.32, out: 0.48, backIn: 0.54, backOut: 0.62 } // scabbard parallel ramp (back before resheathe)
-const FRAME = { in: 0.2, out: 0.48, backIn: 0.8, backOut: 1.0 } // hero→display camera ramp
-const DRIFT = { a: 0.46, b: 0.5, c: 0.52, d: 0.56 } // hold drift bump
+//  STAGE 1 (ABOUT): forward journey only — the sword draws, then SETTLES slowly into
+//  the parallel layout across the whole About-beat sequence, reaching full parallel at
+//  SETTLE_END = the moment the last beat lands. The back half (hold/return/resheathe/
+//  hero-return) is DROPPED: every back-ramp is pushed past 1 so it never triggers.
+//  0.00–0.20  unsheathe (built-in clip, UNCHANGED)
+//  0.20–0.32  rotate toward horizontal (UNCHANGED)
+//  0.32–0.87  scabbard glides parallel — SLOWED to span the beats (only timing change)
+//  0.87–1.00  full parallel held → unpin → normal scroll
+const SETTLE_END = 0.87 // full parallel = last About beat lands
+const CLIP = { in: 0.0, out: 0.2, backIn: 1.5, backOut: 1.6 } // unsheathe only — never resheathe
+const POSE = { in: 0.2, out: 0.32, backIn: 1.5, backOut: 1.6 } // hold horizontal — never rotate back
+const PART = { in: 0.32, out: SETTLE_END, backIn: 1.5, backOut: 1.6 } // SLOWED settle, no return
+const FRAME = { in: 0.2, out: SETTLE_END, backIn: 1.5, backOut: 1.6 } // camera paced to the slow settle
+const DRIFT = { a: 1.5, b: 1.6, c: 1.7, d: 1.8 } // drift bump disabled (was the dropped hold)
 
 /* ---- Object motion -------------------------------------------------------- */
 const SCAB_DROP = 0.32 // scabbard offset perpendicular to the blade (fraction of blade length)
@@ -68,7 +73,7 @@ const START_DRAWN = 0.12 // resting clip fraction at scroll 0 — opens mid-gest
 // Active during the unsheathe + resheathe (when the blade overlaps the bore); OFF
 // during the display, where the blade is fully drawn and must be entirely visible.
 const CLIP_DRAW_CLEAR = 0.3 // p ≤ this: clip ON (covers the unsheathe, blade clears by 0.2)
-const CLIP_RESHEATHE = 0.62 // p ≥ this: clip ON again (scabbard back home, blade slides in)
+const CLIP_RESHEATHE = 1.5 // STAGE 1: resheathe dropped — blade stays drawn, never re-clipped
 
 /* ---- Damping — the SINGLE source of smoothing ----------------------------- */
 // One progress value `p` is damped toward the raw scroll each frame; EVERYTHING
@@ -574,6 +579,34 @@ const PILL = 'font-mono text-[0.64rem] tracking-[0.13em] uppercase px-3 py-1.5 r
 // overlay is fully off the top by the time the parallel layout begins (~p 0.3).
 const HERO_RISE = 340
 
+/* ---- ABOUT overlay (STAGE 1, placeholders) -------------------------------- */
+// All NEW fixed layers — they fade/scale IN PLACE (they do NOT rise with the hero
+// block), each driven by the same `progressRef`. Windows are plateau in/out ramps in
+// progress space, sequenced so cues clear BEFORE "About", which clears BEFORE the
+// beats, and only ONE beat is ever visible. Placeholders — typography comes later.
+const CUE = { a: 0.13, b: 0.2, c: 0.25, d: 0.3 } // approach cues fill the emptied corners
+const ABOUT = { a: 0.33, b: 0.38, c: 0.41, d: 0.45 } // "About" — blade fully drawn, still wide
+// 6 beats across the slowed settle (0.46 → SETTLE_END). Each fades fully OUT before the
+// next fades IN, and is PINNED in clear space: ABOVE/BELOW while the sword is still wide,
+// LEFT/RIGHT once it narrows into parallel bars. The 6th holds until full parallel.
+const BEATS = [
+  { id: 1, zone: 'ABOVE', a: 0.46, b: 0.482, c: 0.515, d: 0.533 },
+  { id: 2, zone: 'BELOW', a: 0.54, b: 0.562, c: 0.589, d: 0.607 },
+  { id: 3, zone: 'ABOVE', a: 0.614, b: 0.636, c: 0.662, d: 0.68 },
+  { id: 4, zone: 'LEFT', a: 0.687, b: 0.709, c: 0.736, d: 0.753 },
+  { id: 5, zone: 'RIGHT', a: 0.76, b: 0.782, c: 0.809, d: 0.827 },
+  { id: 6, zone: 'LEFT', a: 0.834, b: 0.86, c: 1.1, d: 1.2 }, // holds to full parallel
+] as const
+
+// Placement wrapper per zone — flex-centers the beat so its driven child carries ONLY a
+// scale transform (no positional transform to fight). Pinned: it never moves once placed.
+const ZONE_WRAP: Record<string, string> = {
+  ABOVE: 'absolute inset-x-0 top-[15vh] flex justify-center',
+  BELOW: 'absolute inset-x-0 bottom-[15vh] flex justify-center',
+  LEFT: 'absolute inset-y-0 left-[7vw] flex flex-col justify-center items-start',
+  RIGHT: 'absolute inset-y-0 right-[7vw] flex flex-col justify-center items-end',
+}
+
 export default function App() {
   const axesRef = useRef<Axes | null>(null)
   const progressRef = useRef(0)
@@ -582,6 +615,12 @@ export default function App() {
   const nameLayerRef = useRef<HTMLDivElement>(null) // wordmark layer
   const hudRef = useRef<HTMLDivElement>(null) // tagline / nav / corners
   const pctRef = useRef<HTMLSpanElement>(null)
+
+  // ABOUT overlay refs (STAGE 1) — fade/scale in place, driven below.
+  const concentrateRef = useRef<HTMLDivElement>(null)
+  const scrollCueRef = useRef<HTMLDivElement>(null)
+  const aboutRef = useRef<HTMLDivElement>(null)
+  const beatRefs = useRef<(HTMLDivElement | null)[]>([])
 
   // The ENTIRE hero overlay (tree + name + HUD) scrolls UP and out as ONE block,
   // tied to the shared progress so it matches the unsheathe pace. NOT fading in place.
@@ -595,6 +634,21 @@ export default function App() {
       if (nameLayerRef.current) nameLayerRef.current.style.transform = rise
       if (hudRef.current) hudRef.current.style.transform = rise
       if (pctRef.current) pctRef.current.textContent = `${Math.round(clamp01(p) * 100)}`.padStart(3, '0')
+
+      // ABOUT overlay — fade + subtle scale in place from the shared progress.
+      const drive = (el: HTMLElement | null | undefined, t: number) => {
+        if (!el) return
+        el.style.opacity = `${t}`
+        el.style.transform = `scale(${0.9 + 0.1 * t})`
+      }
+      const cue = plateau(p, CUE.a, CUE.b, CUE.c, CUE.d)
+      drive(concentrateRef.current, cue)
+      drive(scrollCueRef.current, cue)
+      drive(aboutRef.current, plateau(p, ABOUT.a, ABOUT.b, ABOUT.c, ABOUT.d))
+      for (let i = 0; i < BEATS.length; i++) {
+        const b = BEATS[i]
+        drive(beatRefs.current[i], plateau(p, b.a, b.b, b.c, b.d))
+      }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
@@ -687,6 +741,53 @@ export default function App() {
           <span className={MONO}>scroll</span>
           <span className="block w-px h-9 bg-linear-to-b from-washi/55 to-transparent" />
         </div>
+      </div>
+
+      {/* Layer 3 — ABOUT overlay (STAGE 1 placeholders). Fixed; fades/scales in place,
+          driven by the shared progress. ABOVE the canvas, never rises. */}
+      <div className="fixed inset-0 z-20 pointer-events-none text-washi">
+        {/* APPROACH cues — fill the corners the HUD vacated as the blade draws */}
+        <div
+          ref={concentrateRef}
+          style={{ opacity: 0 }}
+          className="absolute top-[14vh] left-[6vw] origin-top-left font-mono text-[0.7rem] tracking-[0.3em] uppercase text-washi/55"
+        >
+          Concentrate
+        </div>
+        <div
+          ref={scrollCueRef}
+          style={{ opacity: 0 }}
+          className="absolute bottom-[14vh] right-[6vw] origin-bottom-right font-mono text-[0.7rem] tracking-[0.3em] uppercase text-washi/55"
+        >
+          Scroll down
+        </div>
+
+        {/* ABOUT — arrives once the blade is fully drawn, still wide/spread */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <div ref={aboutRef} style={{ opacity: 0 }} className="flex flex-col items-center gap-4">
+            <span className="font-display font-black tracking-[-0.03em] leading-none text-[clamp(3rem,9vw,7rem)]">
+              About
+            </span>
+            <span className="font-mono text-[0.62rem] tracking-[0.28em] uppercase text-washi/45">
+              scroll down
+            </span>
+          </div>
+        </div>
+
+        {/* BEATS — one at a time, each PINNED in clear space (placeholders) */}
+        {BEATS.map((b, i) => (
+          <div key={b.id} className={ZONE_WRAP[b.zone]}>
+            <div
+              ref={(el) => {
+                beatRefs.current[i] = el
+              }}
+              style={{ opacity: 0 }}
+              className="font-mono tracking-[0.18em] uppercase text-washi/80 text-[clamp(0.8rem,1.5vw,1.1rem)]"
+            >
+              Beat {b.id} <span className="text-gold/70">/ {b.zone}</span>
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Loading state (DOM overlay, fades out when the model is ready). */}
