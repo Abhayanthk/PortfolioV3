@@ -570,31 +570,30 @@ const HEX_MASK: React.CSSProperties = {
 // Reusable class fragments (kept DRY; all styling is Tailwind utilities).
 const MONO = 'font-mono text-[0.7rem] tracking-[0.22em] uppercase text-washi/50'
 const PILL = 'font-mono text-[0.64rem] tracking-[0.13em] uppercase px-3 py-1.5 rounded-full border'
+// How far (in vh) the whole hero block rises per unit of progress. Sized so the
+// overlay is fully off the top by the time the parallel layout begins (~p 0.3).
+const HERO_RISE = 340
 
 export default function App() {
   const axesRef = useRef<Axes | null>(null)
   const progressRef = useRef(0)
 
-  const sakuraRef = useRef<HTMLDivElement>(null)
-  const wordmarkRef = useRef<HTMLHeadingElement>(null)
-  const hudRef = useRef<HTMLDivElement>(null)
+  const backdropRef = useRef<HTMLDivElement>(null) // sakura layer
+  const nameLayerRef = useRef<HTMLDivElement>(null) // wordmark layer
+  const hudRef = useRef<HTMLDivElement>(null) // tagline / nav / corners
   const pctRef = useRef<HTMLSpanElement>(null)
 
-  // Drive the hero's fades + parallax + live scroll % off the ONE shared progress.
+  // The ENTIRE hero overlay (tree + name + HUD) scrolls UP and out as ONE block,
+  // tied to the shared progress so it matches the unsheathe pace. NOT fading in place.
+  // The 3D sword lives on the fixed canvas and is untouched.
   useEffect(() => {
     let raf = 0
     const tick = () => {
       const p = progressRef.current
-      const hudFade = 1 - smoothstep(0.02, 0.16, p) // tagline / nav / corners clear early
-      const treeFade = 1 - smoothstep(0.08, 0.42, p) // sakura lingers a touch longer
-      const nameFade = 1 - smoothstep(0.5, 0.64, p) // wordmark PERSISTS, fades only at the About beat
-      if (hudRef.current) hudRef.current.style.opacity = `${hudFade}`
-      if (sakuraRef.current) sakuraRef.current.style.opacity = `${0.55 * treeFade}`
-      if (wordmarkRef.current) {
-        // Subtle parallax: drifts up slower than the scene; stays readable through the draw.
-        wordmarkRef.current.style.opacity = `${0.92 * nameFade}`
-        wordmarkRef.current.style.transform = `translateY(${-p * 0.12 * window.innerHeight}px)`
-      }
+      const rise = `translateY(${-p * HERO_RISE}vh)`
+      if (backdropRef.current) backdropRef.current.style.transform = rise
+      if (nameLayerRef.current) nameLayerRef.current.style.transform = rise
+      if (hudRef.current) hudRef.current.style.transform = rise
       if (pctRef.current) pctRef.current.textContent = `${Math.round(clamp01(p) * 100)}`.padStart(3, '0')
       raf = requestAnimationFrame(tick)
     }
@@ -604,10 +603,9 @@ export default function App() {
 
   return (
     <>
-      {/* Layer 0 — backdrop: sakura tree vignette, BEHIND the canvas. */}
-      <div className="fixed inset-0 z-0 overflow-hidden pointer-events-none">
+      {/* Layer 0 — backdrop: sakura tree vignette, BEHIND the canvas. Scrolls up. */}
+      <div ref={backdropRef} className="fixed inset-0 z-0 overflow-hidden pointer-events-none">
         <div
-          ref={sakuraRef}
           className="absolute left-1/2 top-[46%] -translate-x-1/2 -translate-y-1/2 w-[min(62vh,88vw)] h-[min(93vh,132vw)] bg-[url('/Sakura_tree_bg.png')] bg-contain bg-center bg-no-repeat mix-blend-screen"
           style={{ opacity: 0.55, ...HEX_MASK }}
         />
@@ -633,10 +631,12 @@ export default function App() {
       </Canvas>
 
       {/* Layer 1.5 — anchor wordmark ABOVE the canvas so the blade weaves BEHIND the
-          letters (name stays readable). Lifted off the bottom; persists with parallax. */}
-      <div className="fixed inset-0 z-[5] flex items-end justify-center pb-[14vh] pointer-events-none overflow-hidden">
+          letters (stays readable until it scrolls away with the block). */}
+      <div
+        ref={nameLayerRef}
+        className="fixed inset-0 z-[5] flex items-end justify-center pb-[14vh] pointer-events-none overflow-hidden"
+      >
         <h1
-          ref={wordmarkRef}
           className="font-display font-black leading-[0.8] tracking-[-0.04em] whitespace-nowrap text-washi select-none text-[clamp(3.5rem,17.5vw,17rem)]"
           style={{ opacity: 0.92 }}
         >
@@ -644,7 +644,7 @@ export default function App() {
         </h1>
       </div>
 
-      {/* Layer 2 — HUD instrument panel, ABOVE the canvas (fades with scroll). */}
+      {/* Layer 2 — HUD instrument panel, ABOVE the canvas. Scrolls up with the block. */}
       <div ref={hudRef} className="fixed inset-0 z-10 pointer-events-none text-washi">
         {/* top-left — monogram + tagline */}
         <div className="absolute top-6 left-6 md:top-10 md:left-10">
