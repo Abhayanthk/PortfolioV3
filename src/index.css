@@ -8,6 +8,7 @@
   --color-gold: #c8a24a;
   --font-display: 'Archivo', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  --font-dramatic: 'Cormorant Garamond', 'Georgia', serif;
 }
 
 @layer base {

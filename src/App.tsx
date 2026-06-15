@@ -750,14 +750,14 @@ export default function App() {
         <div
           ref={concentrateRef}
           style={{ opacity: 0 }}
-          className="absolute top-[14vh] left-[6vw] origin-top-left font-mono text-[0.7rem] tracking-[0.3em] uppercase text-washi/55"
+          className="absolute top-[36vh] left-[10vw] origin-top-left font-dramatic italic font-light text-[clamp(2rem,5vw,4.5rem)] tracking-[0.08em] uppercase text-washi/40 leading-none"
         >
           Concentrate
         </div>
         <div
           ref={scrollCueRef}
           style={{ opacity: 0 }}
-          className="absolute bottom-[14vh] right-[6vw] origin-bottom-right font-mono text-[0.7rem] tracking-[0.3em] uppercase text-washi/55"
+          className="absolute bottom-[34vh] right-[8vw] origin-bottom-right font-dramatic italic font-light text-[clamp(2rem,5vw,4.5rem)] tracking-[0.08em] uppercase text-washi/40 leading-none"
         >
           Scroll down
         </div>
