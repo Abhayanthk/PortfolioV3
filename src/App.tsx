@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Environment, Loader, ScrollControls, useAnimations, useGLTF, useScroll, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
@@ -60,29 +60,32 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0)
 //  0.87–1.00  full parallel held → unpin → normal scroll
 const SETTLE_END = 0.87 // full parallel = last About beat lands
 
-/* ---- STAGE 2: ABOUT → PROJECTS transition (the "pixel zone") ---------------
- * After the last beat, scrolling further RE-ENABLES the back-ramps so the katana
- * RETURNS to its sheathed hero pose — reverse-scrub of the SAME built-in clip +
- * reverse of the parallel offset — while the projects landscape de-pixelates.
- * Both ramp off the SAME progress `p` and CLIMAX together at RETURN.out /
- * PIXEL.climax (katana sheathed exactly as the image resolves), then a short
- * pixel burst hands off to the Projects skeleton.
+/* ---- STAGE 2: ABOUT → PROJECTS transition (StringTune localized dissolve) ---
+ * After the last beat, scrolling further re-sheathes the katana (reverse-scrub of
+ * the SAME built-in clip + reverse of the parallel offset — exact reverse, no
+ * reconstruction) WHILE it PIXEL-DISSOLVES: the sword breaks into screen-space
+ * blocks confined to its own horizontal band and vanishes, revealing the CLEAN,
+ * vibrant landscape behind it (the landscape is NEVER glitched or darkened).
+ * Then a small "projects" label appears on the clean landscape, and the landscape
+ * + label do the SAME quick pixel-dissolve to hand off to the rows section.
  */
-const RETURN = { in: 0.88, out: 0.96 } // katana reverse-scrub + parallel/frame reverse
-const PIXEL = { in: 0.88, climax: 0.96 } // landscape resolve span — climaxes WITH the sheathe
-const HERO_RETURN = { in: 0.9, out: 0.96 } // restore the hero roll / aim / zoom at the climax
-const BURST = { a: 0.95, b: 0.962, c: 0.969, d: 0.985 } // pixel burst around the synced climax
-const ABOUT_CLEAR = { in: 0.875, out: 0.905 } // about beats clear as the zone begins
-const DARKEN = { in: 0.93, out: 0.965 } // landscape darkens to a backdrop as it resolves
-const PROJ_IN = { in: 0.965, out: 0.996 } // projects rows resolve in after the burst
-const SWORD_FADE = { in: 0.962, out: 0.99 } // hero canvas (sword + petals) fades out into projects
+const RETURN = { in: 0.87, out: 0.925 } // katana reverse clip-scrub + reverse parallel offset
+const KDISS = { in: 0.885, out: 0.93 } // localized katana pixel-dissolve
+const KBAND = { center: 0.5, half: 0.27, feather: 0.1 } // dissolve band (fraction of viewport height)
+const KBLOCK_PX = 22 // dissolve block size in device px
+const PETAL_FADE = { in: 0.88, out: 0.92 } // petals fade out as the sword dissolves
+const LAND_APPEAR = { in: 0.885, out: 0.915 } // CLEAN landscape fades in behind the dissolving sword
+const LABEL_IN = { in: 0.935, out: 0.96 } // small "projects" label resolves in on the clean landscape
+const LAND_DISS = { in: 0.965, out: 0.995 } // landscape + label pixel-dissolve away
+const ROWS_IN = { in: 0.97, out: 0.998 } // plain dark (#0A0A0A) rows section revealed behind
+const ABOUT_CLEAR = { in: 0.86, out: 0.89 } // about beats clear as the zone begins
 const LANDSCAPE_URL = '/Ukiyo-e_Landscape_Jun_17_2026.png'
 const LAND_IMG_ASPECT = 1915 / 821
 
-const CLIP = { in: 0.0, out: 0.2, backIn: RETURN.in, backOut: RETURN.out } // unsheathe → resheathe
-const POSE = { in: 0.2, out: 0.32, backIn: RETURN.in, backOut: RETURN.out } // hold horizontal → rotate back
-const PART = { in: 0.32, out: SETTLE_END, backIn: RETURN.in, backOut: RETURN.out } // settle → reverse offset
-const FRAME = { in: 0.2, out: SETTLE_END, backIn: RETURN.in, backOut: RETURN.out } // camera → back to hero framing
+const CLIP = { in: 0.0, out: 0.2, backIn: RETURN.in, backOut: RETURN.out } // unsheathe → reverse-scrub resheathe
+const POSE = { in: 0.2, out: 0.32, backIn: 1.5, backOut: 1.6 } // hold horizontal — stays in the band, never rotates back
+const PART = { in: 0.32, out: SETTLE_END, backIn: RETURN.in, backOut: RETURN.out } // settle → reverse parallel offset
+const FRAME = { in: 0.2, out: SETTLE_END, backIn: 1.5, backOut: 1.6 } // camera holds display framing (band stays put)
 const DRIFT = { a: 1.5, b: 1.6, c: 1.7, d: 1.8 } // drift bump disabled (was the dropped hold)
 
 /* ---- Object motion -------------------------------------------------------- */
@@ -93,7 +96,7 @@ const START_DRAWN = 0.12 // resting clip fraction at scroll 0 — opens mid-gest
 // Active during the unsheathe + resheathe (when the blade overlaps the bore); OFF
 // during the display, where the blade is fully drawn and must be entirely visible.
 const CLIP_DRAW_CLEAR = 0.3 // p ≤ this: clip ON (covers the unsheathe, blade clears by 0.2)
-const CLIP_RESHEATHE = PIXEL.in // p ≥ this: clip ON again so the returning blade hides inside the sheath
+const CLIP_RESHEATHE = RETURN.in // p ≥ this: clip ON again so the returning blade hides inside the sheath
 
 /* ---- PETAL FIELD (Stage 1: drifting field + scroll-gated presence) ---------
  * A camera-locked instanced field of sakura petals spanning the hero + about.
@@ -351,6 +354,29 @@ function deriveAxes(scene: THREE.Object3D): Axes {
 
 const HERO_QUAT = new THREE.Quaternion() // identity = the authored diagonal hero pose
 
+// Localized pixel-dissolve injected into the SWORD's own materials: the blade breaks
+// into screen-space blocks confined to a horizontal band and discards them as the
+// dissolve grows — revealing the clean landscape behind WITHOUT touching anything
+// outside the sword (no full-screen pixelation, no darkening).
+const KDISS_GLSL_HEAD = `
+uniform float uKDissolve;
+uniform vec2 uRes;
+uniform float uBandCenter;
+uniform float uBandHalf;
+uniform float uBandFeather;
+uniform float uBlockPx;
+float kdHash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+`
+const KDISS_GLSL_BODY = `
+  if (uKDissolve > 0.0001) {
+    vec2 kdCell = floor(gl_FragCoord.xy / uBlockPx);
+    float kdN = kdHash(kdCell);
+    float kdY = gl_FragCoord.y / uRes.y;
+    float kdBand = 1.0 - smoothstep(uBandHalf, uBandHalf + uBandFeather, abs(kdY - uBandCenter));
+    if (kdN < uKDissolve * kdBand) discard;
+  }
+`
+
 // Data extracted from the built-in clip once it's loaded (sampled at its end pose).
 type ClipData = {
   mixer: THREE.AnimationMixer
@@ -382,6 +408,20 @@ function Katana({ axesRef, progressRef }: DriveProps) {
   // Clip plane: starts "open" (constant huge ⇒ nothing clipped) until driven each frame.
   const clipPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(1, 0, 0), 1e9), [])
 
+  // Shared uniforms for the sword's pixel-dissolve (mutated each frame; bound into
+  // every sword material's shader via onBeforeCompile below).
+  const dissolve = useMemo(
+    () => ({
+      uKDissolve: { value: 0 },
+      uRes: { value: new THREE.Vector2(1, 1) },
+      uBandCenter: { value: KBAND.center },
+      uBandHalf: { value: KBAND.half },
+      uBandFeather: { value: KBAND.feather },
+      uBlockPx: { value: KBLOCK_PX },
+    }),
+    []
+  )
+
   // Built-in clip, sampled for its end pose + the derived display/scabbard targets.
   const clipRef = useRef<ClipData | null>(null)
 
@@ -406,13 +446,20 @@ function Katana({ axesRef, progressRef }: DriveProps) {
         const c = m.clone()
         c.clippingPlanes = [clipPlane]
         c.clipShadows = true
+        // Inject the localized pixel-dissolve discard (shares `dissolve` uniforms).
+        c.onBeforeCompile = (shader) => {
+          Object.assign(shader.uniforms, dissolve)
+          shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', `#include <common>\n${KDISS_GLSL_HEAD}`)
+            .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${KDISS_GLSL_BODY}`)
+        }
         return c
       }
       mesh.material = Array.isArray(mesh.material)
         ? mesh.material.map(bind)
         : bind(mesh.material)
     })
-  }, [axes, gl, clipPlane])
+  }, [axes, gl, clipPlane, dissolve])
 
   // Set up the built-in unsheathe clip: pause it (we scrub by scroll), and SAMPLE its
   // end pose so the parallel layout + display orientation hand off with no jump.
@@ -468,6 +515,11 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     cd.action.time = frac * cd.duration
     cd.mixer.update(0) // applies the blade pose for this clip time
 
+    // PIXEL-DISSOLVE: drive the sword's localized block-discard + keep it sized to the
+    // drawing buffer so gl_FragCoord maths line up.
+    dissolve.uKDissolve.value = smoothstep(KDISS.in, KDISS.out, p)
+    dissolve.uRes.value.set(gl.domElement.width, gl.domElement.height)
+
     // SCABBARD: glide rest → parallel target (under the drawn blade + drop) by part(p).
     const part = plateau(p, PART.in, PART.out, PART.backIn, PART.backOut)
     scabbard.position.lerpVectors(scab0, cd.scabPos, part)
@@ -478,12 +530,8 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     poseRef.current.quaternion.slerpQuaternions(HERO_QUAT, cd.displayQuat, poseAmt)
 
     // HERO ROLL: at rest the whole assembly is rolled so the handle reads upper-right;
-    // eases to identity as you scroll in, then rolls BACK on the return so the sheathed
-    // blade lands in its original hero pose at the climax.
-    const heroAmt = Math.max(
-      1 - smoothstep(HERO_BLEND.in, HERO_BLEND.out, p),
-      smoothstep(HERO_RETURN.in, HERO_RETURN.out, p)
-    )
+    // eases to identity as you scroll in, handing off to the untouched choreography.
+    const heroAmt = 1 - smoothstep(HERO_BLEND.in, HERO_BLEND.out, p)
     heroRef.current.quaternion.slerpQuaternions(HERO_QUAT, heroRollQuat, heroAmt)
 
     // CLIP PLANE: hide the blade still inside the sheath. Sits at the scabbard mouth,
@@ -539,12 +587,8 @@ function Rig({ axesRef, progressRef }: DriveProps) {
     focus.copy(pa).add(pb).multiplyScalar(0.5)
 
     // HERO aim: target the guard/handle (scabbard mouth + a shift toward the handle),
-    // pushed toward the UPPER-RIGHT of the frame. Blends out into the normal focus, then
-    // blends BACK on the return so the camera reframes the hero pose at the climax.
-    const heroAmt = Math.max(
-      1 - smoothstep(HERO_BLEND.in, HERO_BLEND.out, p),
-      smoothstep(HERO_RETURN.in, HERO_RETURN.out, p)
-    )
+    // pushed toward the UPPER-RIGHT of the frame. Blends out into the normal focus.
+    const heroAmt = 1 - smoothstep(HERO_BLEND.in, HERO_BLEND.out, p)
     const sc = axes.scabbard
     sc.updateWorldMatrix(true, false)
     heroAim.copy(axes.mouthLocal).applyMatrix4(sc.matrixWorld)
@@ -556,10 +600,8 @@ function Rig({ axesRef, progressRef }: DriveProps) {
 
     const frameAmt = plateau(p, FRAME.in, FRAME.out, FRAME.backIn, FRAME.backOut)
     const driftAmt = plateau(p, DRIFT.a, DRIFT.b, DRIFT.c, DRIFT.d)
-    // Hero zoom: push IN at scroll 0, ease back to the normal offset as the draw starts,
-    // then push BACK in on the return so the climax lands on the tight hero framing.
-    const zoomT = clamp01(smoothstep(ZOOM.in, ZOOM.out, p) - smoothstep(HERO_RETURN.in, HERO_RETURN.out, p))
-    const zoom = THREE.MathUtils.lerp(HERO_ZOOM, 1, zoomT)
+    // Hero zoom: push IN at scroll 0, ease back to the normal offset as the draw starts.
+    const zoom = THREE.MathUtils.lerp(HERO_ZOOM, 1, smoothstep(ZOOM.in, ZOOM.out, p))
 
     off.copy(HERO_OFF).lerp(DISPLAY_OFF, frameAmt).multiplyScalar(zoom).addScaledVector(DRIFT_DIR, driftAmt)
     camera.position.copy(aim).add(off)
@@ -690,13 +732,15 @@ function PetalField({ progressRef }: { progressRef: React.MutableRefObject<numbe
     mesh.position.copy(camera.position)
     mesh.quaternion.copy(camera.quaternion)
 
-    // Presence from scroll ONLY: faint over the hero, fuller across the about.
+    // Presence from scroll ONLY: faint over the hero, fuller across the about, then
+    // faded out as the sword dissolves so the field clears off the clean landscape.
     const p = progressRef.current
-    const presence = THREE.MathUtils.lerp(
-      PETAL_PRESENCE.hero,
-      PETAL_PRESENCE.about,
-      smoothstep(PETAL_PRESENCE.in, PETAL_PRESENCE.out, p)
-    )
+    const presence =
+      THREE.MathUtils.lerp(
+        PETAL_PRESENCE.hero,
+        PETAL_PRESENCE.about,
+        smoothstep(PETAL_PRESENCE.in, PETAL_PRESENCE.out, p)
+      ) * (1 - smoothstep(PETAL_FADE.in, PETAL_FADE.out, p))
     material.opacity = PETAL_MAX_OPACITY * presence
 
     const t = state.clock.elapsedTime
@@ -784,8 +828,9 @@ function Scene({ axesRef, progressRef }: DriveProps) {
 
 /* ============================================================================
  *  LandscapeLayer — the PROJECTS-zone ukiyo-e backdrop, on its OWN canvas behind
- *  the hero canvas. A fullscreen shader quad de-pixelates from glitched → sharp,
- *  driven by the SAME progress as the katana return so both climax together.
+ *  the hero canvas. The image is shown CLEAN + vibrant (no glitch, no darken). It
+ *  fades in behind the dissolving sword, holds, then — with a small "projects"
+ *  label — does the SAME quick pixel-block dissolve to reveal the rows section.
  * ========================================================================== */
 
 const LAND_VERT = /* glsl */ `
@@ -799,56 +844,65 @@ const LAND_VERT = /* glsl */ `
 const LAND_FRAG = /* glsl */ `
   precision highp float;
   uniform sampler2D uTex;
+  uniform sampler2D uLabel;
   uniform vec2 uRes;
   uniform float uImgAspect;
-  uniform float uResolve; // 0 = chunky/glitched, 1 = sharp
-  uniform float uBurst;   // momentary pixel burst at the climax
-  uniform float uAlpha;   // layer presence (0 before the pixel zone)
-  uniform float uDark;    // darken to a backdrop once resolved
-  uniform float uTime;
+  uniform float uLabelAspect;
+  uniform float uAlpha;    // clean landscape presence
+  uniform float uLabelIn;  // "projects" label presence
+  uniform float uLabelH;   // label height (fraction of viewport)
+  uniform float uDissolve; // landscape + label pixel-dissolve away
+  uniform float uBlockPx;
   varying vec2 vUv;
 
-  float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+  float lHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 
   void main() {
     float canvasAspect = uRes.x / uRes.y;
-    // cover-fit the image to the canvas (crop, never stretch)
+    // cover-fit the image (crop, never stretch) — CLEAN, full vibrancy.
     vec2 s = canvasAspect > uImgAspect
       ? vec2(1.0, uImgAspect / canvasAspect)
       : vec2(canvasAspect / uImgAspect, 1.0);
     vec2 uvc = (vUv - 0.5) * s + 0.5;
+    vec3 col = texture2D(uTex, uvc).rgb;
 
-    // PIXELATION: few big blocks when unresolved → full-res when resolved; the burst
-    // momentarily crushes back to chunky blocks.
-    float maxB = max(uRes.x, uRes.y);
-    float blocks = mix(10.0, maxB, pow(clamp(uResolve, 0.0, 1.0), 1.6));
-    blocks = mix(blocks, 7.0, uBurst);
-    vec2 cells = vec2(blocks * canvasAspect, blocks);
-    vec2 uvPix = (floor(uvc * cells) + 0.5) / cells;
+    // small centered "projects" label, aspect-preserved (no stretch).
+    vec2 lsize = vec2(uLabelH * uLabelAspect / canvasAspect, uLabelH);
+    vec2 luv = (vUv - 0.5) / lsize + 0.5;
+    if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) {
+      vec4 lab = texture2D(uLabel, luv);
+      col = mix(col, lab.rgb, lab.a * uLabelIn);
+    }
 
-    // GLITCH: per-row horizontal displacement, fading out as it resolves.
-    float row = floor(uvc.y * 36.0);
-    float jitter = (hash(vec2(row, floor(uTime * 14.0))) - 0.5) * 2.0;
-    float disp = jitter * ((1.0 - uResolve) * 0.06 + uBurst * 0.08);
-    vec2 duv = uvPix + vec2(disp, 0.0);
+    // PIXEL-DISSOLVE: whole-screen blocks vanish as uDissolve grows → reveal rows.
+    vec2 cell = floor(gl_FragCoord.xy / uBlockPx);
+    float n = lHash(cell);
+    float alive = 1.0 - step(n, uDissolve);
 
-    // RGB-SPLIT: channel separation, fading out as it resolves.
-    float shift = (1.0 - uResolve) * 0.05 + uBurst * 0.07;
-    float r = texture2D(uTex, clamp(duv + vec2(shift, 0.0), 0.001, 0.999)).r;
-    float g = texture2D(uTex, clamp(duv, 0.001, 0.999)).g;
-    float b = texture2D(uTex, clamp(duv - vec2(shift, 0.0), 0.001, 0.999)).b;
-    vec3 col = vec3(r, g, b);
-
-    col += uBurst * 0.12; // brief brightness pop on the burst
-
-    // Settle the resolved image back as a darkened, vignetted backdrop.
-    col *= mix(1.0, 0.5, uDark);
-    float vig = smoothstep(1.15, 0.35, length(vUv - 0.5) * 1.35);
-    col *= mix(1.0, vig, uDark * 0.85);
-
-    gl_FragColor = vec4(col, uAlpha);
+    gl_FragColor = vec4(col, uAlpha * alive);
   }
 `
+
+// Draw the "projects" wordmark to a canvas → texture, so it dissolves in the same
+// pass as the landscape. Tight 4:1 canvas keeps the on-screen aspect correction simple.
+const LABEL_CANVAS_ASPECT = 1024 / 256
+function makeLabelTexture(text: string) {
+  const c = document.createElement('canvas')
+  c.width = 1024
+  c.height = 256
+  const ctx = c.getContext('2d')!
+  ctx.clearRect(0, 0, c.width, c.height)
+  ctx.fillStyle = '#ece8e1' // washi
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.font = '600 150px Archivo, system-ui, -apple-system, sans-serif'
+  ;(ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = '14px'
+  ctx.fillText(text, c.width / 2, c.height / 2 + 6)
+  const t = new THREE.CanvasTexture(c)
+  t.colorSpace = THREE.SRGBColorSpace
+  t.needsUpdate = true
+  return t
+}
 
 function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<number> }) {
   const tex = useTexture(LANDSCAPE_URL)
@@ -862,28 +916,30 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
     tex.needsUpdate = true
   }, [tex])
 
+  const labelTex = useMemo(() => makeLabelTexture('projects'), [])
+
   const uniforms = useMemo(
     () => ({
       uTex: { value: tex },
+      uLabel: { value: labelTex },
       uRes: { value: new THREE.Vector2(1, 1) },
       uImgAspect: { value: LAND_IMG_ASPECT },
-      uResolve: { value: 0 },
-      uBurst: { value: 0 },
+      uLabelAspect: { value: LABEL_CANVAS_ASPECT },
       uAlpha: { value: 0 },
-      uDark: { value: 0 },
-      uTime: { value: 0 },
+      uLabelIn: { value: 0 },
+      uLabelH: { value: 0.07 },
+      uDissolve: { value: 0 },
+      uBlockPx: { value: KBLOCK_PX },
     }),
-    [tex]
+    [tex, labelTex]
   )
 
-  useFrame((state) => {
+  useFrame(() => {
     const p = progressRef.current
     uniforms.uRes.value.set(size.width, size.height)
-    uniforms.uResolve.value = smoothstep(PIXEL.in, PIXEL.climax, p)
-    uniforms.uBurst.value = plateau(p, BURST.a, BURST.b, BURST.c, BURST.d)
-    uniforms.uAlpha.value = smoothstep(PIXEL.in - 0.01, PIXEL.in + 0.02, p)
-    uniforms.uDark.value = smoothstep(DARKEN.in, DARKEN.out, p)
-    uniforms.uTime.value = state.clock.elapsedTime
+    uniforms.uAlpha.value = smoothstep(LAND_APPEAR.in, LAND_APPEAR.out, p)
+    uniforms.uLabelIn.value = smoothstep(LABEL_IN.in, LABEL_IN.out, p)
+    uniforms.uDissolve.value = smoothstep(LAND_DISS.in, LAND_DISS.out, p)
   })
 
   return (
@@ -904,7 +960,7 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
 function LandscapeLayer({ progressRef }: { progressRef: React.MutableRefObject<number> }) {
   return (
     <Canvas
-      style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', zIndex: 0, pointerEvents: 'none' }}
+      style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', zIndex: 2, pointerEvents: 'none' }}
       flat
       dpr={[1, 2]}
       gl={{ alpha: true, antialias: false }}
@@ -1017,12 +1073,9 @@ export default function App() {
   const aboutRef = useRef<HTMLDivElement>(null)
   const beatRefs = useRef<(HTMLDivElement | null)[]>([])
 
-  // STAGE 2 transition refs — about clears, hero canvas fades, projects resolve in.
-  const aboutLayerRef = useRef<HTMLDivElement>(null) // whole about overlay, faded out in the zone
-  const canvasWrapRef = useRef<HTMLDivElement>(null) // hero canvas wrapper, faded out into projects
-  const projectsRef = useRef<HTMLDivElement>(null) // projects overlay (opacity / lift)
-  const projectsHitRef = useRef<HTMLDivElement>(null) // rows band — pointer-events gated to when shown
-  const [activeProject, setActiveProject] = useState<number | null>(null)
+  // STAGE 2 transition refs.
+  const aboutLayerRef = useRef<HTMLDivElement>(null) // about overlay, faded out as the zone begins
+  const rowsRef = useRef<HTMLDivElement>(null) // dark rows section, revealed as the landscape dissolves
 
   // The ENTIRE hero overlay (tree + name + HUD) scrolls UP and out as ONE block,
   // tied to the shared progress so it matches the unsheathe pace. NOT fading in place.
@@ -1058,19 +1111,11 @@ export default function App() {
         driveFocus(beatRefs.current[i], plateau(p, b.a, b.b, b.c, b.d))
       }
 
-      // STAGE 2 — the pixel zone hand-off (all off the SAME progress `p`).
-      // About beats clear as the zone begins; the hero canvas (sword + petals) fades
-      // out as it sheathes; the projects rows resolve in after the burst.
+      // STAGE 2 — about beats clear as the zone begins; the plain dark rows section is
+      // revealed (fades in BEHIND the landscape) as the landscape pixel-dissolves away.
       if (aboutLayerRef.current)
         aboutLayerRef.current.style.opacity = `${1 - smoothstep(ABOUT_CLEAR.in, ABOUT_CLEAR.out, p)}`
-      if (canvasWrapRef.current)
-        canvasWrapRef.current.style.opacity = `${1 - smoothstep(SWORD_FADE.in, SWORD_FADE.out, p)}`
-      const proj = smoothstep(PROJ_IN.in, PROJ_IN.out, p)
-      if (projectsRef.current) {
-        projectsRef.current.style.opacity = `${proj}`
-        projectsRef.current.style.transform = `translateY(${(1 - proj) * 3.5}vh)`
-      }
-      if (projectsHitRef.current) projectsHitRef.current.style.pointerEvents = proj > 0.5 ? 'auto' : 'none'
+      if (rowsRef.current) rowsRef.current.style.opacity = `${smoothstep(ROWS_IN.in, ROWS_IN.out, p)}`
 
       raf = requestAnimationFrame(tick)
     }
@@ -1088,13 +1133,48 @@ export default function App() {
         />
       </div>
 
-      {/* Layer 0.5 — PROJECTS landscape backdrop (own canvas, BEHIND the hero canvas).
-          Transparent until the pixel zone; de-pixelates in sync with the katana return. */}
+      {/* Layer 1 — PROJECTS rows: plain dark (#0A0A0A) section revealed BEHIND the
+          landscape as it pixel-dissolves. Empty placeholder rows for now. */}
+      <div
+        ref={rowsRef}
+        className="fixed inset-0 z-[1] bg-ink flex flex-col justify-center pointer-events-none text-washi"
+        style={{ opacity: 0 }}
+      >
+        <div className="px-6 md:px-12 mb-6 md:mb-9">
+          <span className="font-mono text-[0.62rem] tracking-[0.34em] uppercase text-gold/70">
+            鍛 — Selected Work
+          </span>
+          <h2 className="mt-2 font-display font-black tracking-[-0.03em] leading-none text-[clamp(2rem,6vw,4.5rem)]">
+            Projects
+          </h2>
+        </div>
+        {PROJECTS.map((proj) => (
+          <div
+            key={proj.id}
+            className="flex items-baseline justify-between gap-6 w-full border-t border-washi/12 last:border-b px-6 md:px-12 py-7 md:py-9"
+          >
+            <div className="flex items-baseline gap-5 md:gap-8">
+              <span className="font-mono text-[0.7rem] tracking-[0.25em] text-gold/80 tabular-nums">
+                0{proj.id}
+              </span>
+              <span className="font-display font-black uppercase tracking-[-0.02em] text-washi/85 text-[clamp(1.6rem,4.5vw,3.4rem)]">
+                {proj.label}
+              </span>
+            </div>
+            <span className="shrink-0 font-mono text-[0.62rem] tracking-[0.3em] uppercase text-washi/30">
+              Soon
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Layer 2 — CLEAN, vibrant PROJECTS landscape (own canvas). Transparent until
+          the zone; fades in behind the dissolving sword, then pixel-dissolves itself. */}
       <LandscapeLayer progressRef={progressRef} />
 
-      {/* Layer 1 — the 3D scene (transparent so the backdrop shows through). Wrapped so
-          it can fade out as the sword sheathes and we land in Projects. */}
-      <div ref={canvasWrapRef} style={{ position: 'fixed', inset: 0, zIndex: 1 }}>
+      {/* Layer 3 — the 3D scene (transparent so what's behind shows through). The sword
+          pixel-dissolves in its own band to reveal the clean landscape behind it. */}
+      <div style={{ position: 'fixed', inset: 0, zIndex: 3 }}>
         <Canvas
           style={{ width: '100%', height: '100%' }}
           dpr={[1, 2]}
@@ -1253,74 +1333,6 @@ export default function App() {
           </div>
         </div>
       </header>
-
-      {/* Layer 4 — PROJECTS skeleton (STAGE 2 placeholders). Resolves in over the
-          darkened landscape after the pixel burst. Only the rows band is hit-testable
-          (gated above), so scrolling back up still works around it. */}
-      <div
-        ref={projectsRef}
-        className="fixed inset-0 z-30 flex flex-col justify-center pointer-events-none text-washi"
-        style={{ opacity: 0 }}
-      >
-        <div className="px-6 md:px-12 mb-6 md:mb-9">
-          <span className="font-mono text-[0.62rem] tracking-[0.34em] uppercase text-gold/70">
-            鍛 — Selected Work
-          </span>
-          <h2 className="mt-2 font-display font-black tracking-[-0.03em] leading-none text-[clamp(2rem,6vw,4.5rem)]">
-            Projects
-          </h2>
-        </div>
-
-        <div ref={projectsHitRef} style={{ pointerEvents: 'none' }} className="w-full">
-          {PROJECTS.map((proj) => (
-            <button
-              key={proj.id}
-              onClick={() => setActiveProject(proj.id)}
-              className="group relative block w-full text-left border-t border-washi/12 last:border-b px-6 md:px-12 py-7 md:py-9 transition-colors duration-500 hover:bg-washi/[0.03] focus:outline-none"
-            >
-              {/* gold edge wipe on hover */}
-              <span className="absolute inset-y-0 left-0 w-[2px] bg-gold origin-top scale-y-0 transition-transform duration-500 group-hover:scale-y-100" />
-              <div className="flex items-baseline justify-between gap-6">
-                <div className="flex items-baseline gap-5 md:gap-8">
-                  <span className="font-mono text-[0.7rem] tracking-[0.25em] text-gold/80 tabular-nums">
-                    0{proj.id}
-                  </span>
-                  <span className="font-display font-black uppercase tracking-[-0.02em] text-washi/90 transition-colors group-hover:text-washi text-[clamp(1.6rem,4.5vw,3.4rem)]">
-                    {proj.label}
-                  </span>
-                </div>
-                <span className="shrink-0 font-mono text-[0.62rem] tracking-[0.3em] uppercase text-washi/35 transition-colors group-hover:text-gold">
-                  View →
-                </span>
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Placeholder project modal — empty for now. */}
-      {activeProject !== null && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 text-washi">
-          <div className="absolute inset-0 bg-ink/80 backdrop-blur-sm" onClick={() => setActiveProject(null)} />
-          <div className="relative w-full max-w-lg rounded-2xl border border-washi/12 bg-ink/90 p-8 md:p-10">
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-[0.65rem] tracking-[0.3em] uppercase text-gold/80">
-                Project 0{activeProject}
-              </span>
-              <button
-                onClick={() => setActiveProject(null)}
-                className="font-mono text-[0.7rem] tracking-[0.2em] uppercase text-washi/50 transition-colors hover:text-washi"
-              >
-                Close ✕
-              </button>
-            </div>
-            <h3 className="mt-6 font-display font-black text-3xl tracking-[-0.02em]">Coming soon</h3>
-            <p className="mt-3 font-mono text-[0.72rem] leading-relaxed tracking-[0.08em] text-washi/45">
-              Placeholder — project details land here next.
-            </p>
-          </div>
-        </div>
-      )}
 
       {/* Loading state (DOM overlay, fades out when the model is ready). */}
       <Loader
