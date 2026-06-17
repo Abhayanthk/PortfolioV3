@@ -75,6 +75,32 @@ const START_DRAWN = 0.12 // resting clip fraction at scroll 0 — opens mid-gest
 const CLIP_DRAW_CLEAR = 0.3 // p ≤ this: clip ON (covers the unsheathe, blade clears by 0.2)
 const CLIP_RESHEATHE = 1.5 // STAGE 1: resheathe dropped — blade stays drawn, never re-clipped
 
+/* ---- PETAL FIELD (Stage 1: drifting field + scroll-gated presence) ---------
+ * A camera-locked instanced field of sakura petals spanning the hero + about.
+ * Petals fall / sway / tumble on their OWN continuous clock (time-driven, never
+ * spawned by scroll); when one drifts off the bottom it recycles to the top.
+ * SCROLL only gates PRESENCE — how many petals show + overall opacity — so the
+ * field stays faint over the hero and breathes fuller across the about section.
+ * Locked to the camera so it always fills the frame as the camera roams, and so
+ * it reads as atmosphere around the sword without ever fighting it.
+ */
+const PETAL_URL = '/Cherry_Blossom_Petal_3D_Model.glb'
+const PETAL_COUNT = 260 // instanced — a few hundred, cheap on the 25-tri model
+const PETAL_FIELD_W = 5.6 // local half-width (camera-right) of the spawn box
+const PETAL_FIELD_H = 4.2 // local half-height (camera-up); also the recycle band
+const PETAL_DEPTH = { near: -4.0, far: -10.5 } // local z, in front of the camera
+const PETAL_SIZE = { min: 0.11, max: 0.34 } // world units (closer/larger ↔ depth)
+const PETAL_FALL = { min: 0.18, max: 0.5 } // downward drift, units/sec — unhurried
+const PETAL_SWAY_AMP = { min: 0.12, max: 0.6 } // lateral sway, world units
+const PETAL_SWAY_FREQ = { min: 0.18, max: 0.6 } // sway rate, rad/sec — slow
+const PETAL_SPIN = { min: 0.1, max: 0.55 } // tumble rate per axis, rad/sec
+const PETAL_MAX_OPACITY = 0.8
+// Presence vs. scroll: faint in the hero, only a touch more in the about — kept
+// light/unobtrusive there so the beats stay the focus.
+const PETAL_PRESENCE = { hero: 0.16, about: 0.3, in: 0.16, out: 0.5 }
+const PETAL_RANK_BAND = 0.18 // soft window each petal fades in/out across
+const PETAL_RIM = '#d9b25a' // faint gold edge-light, tying petals to the sword's gold
+
 /* ---- Damping — the SINGLE source of smoothing ----------------------------- */
 // One progress value `p` is damped toward the raw scroll each frame; EVERYTHING
 // (clip time, blade, scabbard, camera) is a pure function of that same `p`, so all
@@ -514,6 +540,172 @@ function Rig({ axesRef, progressRef }: DriveProps) {
 }
 
 /* ============================================================================
+ *  PetalField — a camera-locked instanced sakura field across hero + about.
+ *  Time-driven motion (fall/sway/tumble + recycle); scroll gates only presence.
+ * ========================================================================== */
+
+const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo)
+
+type Petal = {
+  x: number // base local-x (sway oscillates around it)
+  z: number // local depth in front of camera (perspective → depth + parallax)
+  size: number
+  fall: number // downward speed (units/sec)
+  swayAmp: number
+  swayFreq: number
+  swayPhase: number
+  spin: THREE.Vector3 // per-axis tumble rate
+  spinPhase: THREE.Vector3 // per-axis starting angle
+  yPhase: number // 0..1 offset into the fall loop so petals don't fall in sync
+  rank: number // 0..1 presence threshold — low ranks show first (faint hero)
+}
+
+function PetalField({ progressRef }: { progressRef: React.MutableRefObject<number> }) {
+  const { camera } = useThree()
+  const { scene } = useGLTF(PETAL_URL)
+  const meshRef = useRef<THREE.InstancedMesh>(null!)
+
+  // Pull the petal geometry out of the GLB, then center + normalize it to ~1 unit
+  // so per-instance `size` maps directly to world size (raw node rotations are
+  // orthonormal — they only spin the shape, which the tumble hides anyway).
+  const geometry = useMemo(() => {
+    let src: THREE.BufferGeometry | undefined
+    scene.traverse((o) => {
+      if (!src && (o as THREE.Mesh).isMesh) src = (o as THREE.Mesh).geometry
+    })
+    const g = (src ?? new THREE.PlaneGeometry(1, 1)).clone()
+    g.computeBoundingBox()
+    const bb = g.boundingBox!
+    const c = bb.getCenter(new THREE.Vector3())
+    const s = bb.getSize(new THREE.Vector3())
+    const maxDim = Math.max(s.x, s.y, s.z) || 1
+    g.translate(-c.x, -c.y, -c.z)
+    g.scale(1 / maxDim, 1 / maxDim, 1 / maxDim)
+    return g
+  }, [scene])
+
+  // Soft, double-sided sakura material with a faint gold fresnel rim that ties the
+  // petals to the sword's gold. depthWrite off so the translucent field layers
+  // gently and the opaque sword still occludes petals behind it.
+  const material = useMemo(() => {
+    const m = new THREE.MeshStandardMaterial({
+      color: 0xffffff, // white base so per-instance colors read true
+      roughness: 0.85,
+      metalness: 0,
+      transparent: true,
+      opacity: PETAL_MAX_OPACITY,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    })
+    m.onBeforeCompile = (shader) => {
+      shader.uniforms.uRim = { value: new THREE.Color(PETAL_RIM) }
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform vec3 uRim;')
+        .replace(
+          '#include <emissivemap_fragment>',
+          `#include <emissivemap_fragment>
+           float rim = pow(1.0 - abs(dot(normalize(vNormal), normalize(vViewPosition))), 3.0);
+           totalEmissiveRadiance += uRim * rim * 0.35;`
+        )
+    }
+    return m
+  }, [])
+
+  // Per-petal params + colors — generated once. Sakura pink with variation: some
+  // paler, some deeper, for depth.
+  const petals = useMemo<Petal[]>(() => {
+    const arr: Petal[] = []
+    for (let i = 0; i < PETAL_COUNT; i++) {
+      arr.push({
+        x: rand(-PETAL_FIELD_W, PETAL_FIELD_W),
+        z: rand(PETAL_DEPTH.far, PETAL_DEPTH.near),
+        size: rand(PETAL_SIZE.min, PETAL_SIZE.max),
+        fall: rand(PETAL_FALL.min, PETAL_FALL.max),
+        swayAmp: rand(PETAL_SWAY_AMP.min, PETAL_SWAY_AMP.max),
+        swayFreq: rand(PETAL_SWAY_FREQ.min, PETAL_SWAY_FREQ.max),
+        swayPhase: rand(0, Math.PI * 2),
+        spin: new THREE.Vector3(
+          rand(PETAL_SPIN.min, PETAL_SPIN.max) * (Math.random() < 0.5 ? -1 : 1),
+          rand(PETAL_SPIN.min, PETAL_SPIN.max) * (Math.random() < 0.5 ? -1 : 1),
+          rand(PETAL_SPIN.min, PETAL_SPIN.max) * 0.5 * (Math.random() < 0.5 ? -1 : 1)
+        ),
+        spinPhase: new THREE.Vector3(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28)),
+        yPhase: Math.random(),
+        rank: Math.random(),
+      })
+    }
+    return arr
+  }, [])
+
+  const dummy = useMemo(() => new THREE.Object3D(), [])
+
+  // Paint per-instance sakura colors once (HSL around pink, varied saturation +
+  // lightness so the field has paler and deeper petals).
+  useLayoutEffect(() => {
+    const mesh = meshRef.current
+    const col = new THREE.Color()
+    for (let i = 0; i < PETAL_COUNT; i++) {
+      col.setHSL(0.91 + Math.random() * 0.06, 0.42 + Math.random() * 0.32, 0.7 + Math.random() * 0.2)
+      mesh.setColorAt(i, col)
+    }
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+  }, [])
+
+  useFrame((state) => {
+    const mesh = meshRef.current
+    if (!mesh) return
+
+    // Lock the whole field to the camera so it always fills the frame and falls
+    // straight down-screen no matter where the camera roams / zooms / aims.
+    mesh.position.copy(camera.position)
+    mesh.quaternion.copy(camera.quaternion)
+
+    // Presence from scroll ONLY: faint over the hero, fuller across the about.
+    const p = progressRef.current
+    const presence = THREE.MathUtils.lerp(
+      PETAL_PRESENCE.hero,
+      PETAL_PRESENCE.about,
+      smoothstep(PETAL_PRESENCE.in, PETAL_PRESENCE.out, p)
+    )
+    material.opacity = PETAL_MAX_OPACITY * presence
+
+    const t = state.clock.elapsedTime
+    const span = PETAL_FIELD_H * 2
+
+    for (let i = 0; i < PETAL_COUNT; i++) {
+      const pt = petals[i]
+      // TIME-driven fall with modulo recycle — top → bottom → top, forever.
+      const travelled = (t * pt.fall + pt.yPhase * span) % span
+      const y = PETAL_FIELD_H - travelled
+      const x = pt.x + pt.swayAmp * Math.sin(t * pt.swayFreq + pt.swayPhase)
+
+      // Presence gate: each petal fades in (scale) once presence passes its rank.
+      const vis = clamp01((presence - pt.rank) / PETAL_RANK_BAND)
+
+      dummy.position.set(x, y, pt.z)
+      dummy.rotation.set(
+        pt.spinPhase.x + t * pt.spin.x,
+        pt.spinPhase.y + t * pt.spin.y,
+        pt.spinPhase.z + t * pt.spin.z
+      )
+      dummy.scale.setScalar(pt.size * vis)
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+    }
+    mesh.instanceMatrix.needsUpdate = true
+  })
+
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[geometry, material, PETAL_COUNT]}
+      frustumCulled={false}
+      renderOrder={1}
+    />
+  )
+}
+
+/* ============================================================================
  *  Scene — lights, environment reflections (UNCHANGED), the katana, the rig
  * ========================================================================== */
 
@@ -553,6 +745,9 @@ function Scene({ axesRef, progressRef }: DriveProps) {
 
       <Katana axesRef={axesRef} progressRef={progressRef} />
       <Rig axesRef={axesRef} progressRef={progressRef} />
+      {/* Ambient sakura field — behind/around the sword, after Rig so it locks to
+          the camera the Rig has already placed this frame. */}
+      <PetalField progressRef={progressRef} />
     </>
   )
 }
@@ -873,3 +1068,4 @@ export default function App() {
 }
 
 useGLTF.preload(MODEL_URL)
+useGLTF.preload(PETAL_URL)
