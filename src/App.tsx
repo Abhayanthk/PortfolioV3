@@ -61,35 +61,39 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const SETTLE_END = 0.87 // full parallel = last About beat lands
 
 /* ---- STAGE 2: ABOUT → PROJECTS transition (exact ordered sequence) ----------
- * PHASE 1  re-sheathe BOTH pieces: reverse the parallel offset (scabbard, via PART)
- *          AND reverse-scrub the clip (blade slides INTO the scabbard, via CLIP) so
- *          they REUNITE into one sheathed katana — completes BEFORE the glitch.
- * PHASE 2  glitch-IN: blocks of ONE image-toned color resolve into the CLEAN, vibrant
- *          landscape; the sheathed katana is simply REMOVED during the glitch (no
- *          separate animation — hidden under the glitch, gone from then on).
+ * PHASE 1  re-sheathe = EXACT REVERSE of the unsheathe, in two ordered steps:
+ *   STEP 1  reverse the PARALLEL offset (PART) → blade + scabbard return to the clip's
+ *           END pose (blade fully drawn but ALIGNED with the scabbard mouth); clip held.
+ *   STEP 2  THEN reverse-scrub the clip (CLIP end→0) → blade slides cleanly back INSIDE
+ *           the scabbard → one clean sheathed katana.
+ *   Timed TOGETHER with the landscape glitch-IN so both finish at the SAME moment.
+ * PHASE 2  the sheathed katana PIXELS OUT (chunky localized dissolve) → clean landscape.
  * PHASE 3  small "projects" label resolves with a clean blur-to-sharp.
  * PHASE 4  glitch-OUT: blocks of ONE bg color (#0A0A0A) vanish into the rows section.
  * PHASE 5  plain dark (#0A0A0A) rows section — empty placeholders, no katana/landscape.
  */
-const RETURN = { in: 0.87, out: 0.9 } // PHASE 1: reverse parallel offset (scabbard) + reverse clip (blade)
-const LAND_REVEAL = { in: 0.9, out: 0.93 } // PHASE 2: one-color glitch-in resolves the clean landscape
-const KATANA_HIDE = 0.4 // remove the katana once the glitch-in passes this fraction
-const LABEL_IN = { in: 0.955, out: 0.975 } // PHASE 3: "projects" label clean blur-to-sharp
-const LAND_VANISH = { in: 0.978, out: 0.998 } // PHASE 4: one-color glitch-out — label + landscape vanish
-const ROWS_IN = { in: 0.982, out: 1.0 } // PHASE 5: plain dark rows section revealed
+const RESHEATHE_OFFSET = { in: 0.87, out: 0.905 } // STEP 1: reverse parallel offset → clip END pose
+const RESHEATHE_CLIP = { in: 0.905, out: 0.93 } // STEP 2: reverse-scrub clip → blade slides INTO scabbard
+const LAND_REVEAL = { in: 0.875, out: 0.93 } // glitch-in resolves the landscape — FINISHES with the sheathe
+const KDISS = { in: 0.935, out: 0.962 } // PHASE 2: katana chunky pixel-dissolve (fully gone after)
+const KBAND = { center: 0.5, half: 0.3, feather: 0.12 } // dissolve band (fraction of viewport height)
+const KBLOCK_PX = 48 // CHUNKY katana dissolve block size (device px)
+const LABEL_IN = { in: 0.966, out: 0.983 } // PHASE 3: "projects" label clean blur-to-sharp
+const LAND_VANISH = { in: 0.986, out: 0.999 } // PHASE 4: one-color glitch-out — label + landscape vanish
+const ROWS_IN = { in: 0.988, out: 1.0 } // PHASE 5: plain dark rows section revealed
 const LAND_BLOCKS = 24 // landscape glitch block count (vertical)
 const LAND_IN_COLOR = '#6f7e8c' // fallback glitch-in tone (overwritten by the image's average)
 const LAND_OUT_COLOR = '#0a0a0a' // glitch-out tone = projects section bg
 const PAN_STRENGTH = 0.95 // how far the mouse pans into the cropped image margin (1 = full)
-const PETAL_FADE = { in: 0.875, out: 0.905 } // petals clear as the katana re-sheathes
+const PETAL_FADE = { in: 0.87, out: 0.91 } // petals clear as the katana re-sheathes
 const ABOUT_CLEAR = { in: 0.855, out: 0.885 } // about beats clear as the zone begins
 const LANDSCAPE_URL = '/Ukiyo-e_Landscape_Jun_17_2026.png'
 const LAND_IMG_ASPECT = 1915 / 821
 
-const CLIP = { in: 0.0, out: 0.2, backIn: RETURN.in, backOut: RETURN.out } // unsheathe → reverse-scrub: blade slides INTO sheath
-const POSE = { in: 0.2, out: 0.32, backIn: 1.5, backOut: 1.6 } // hold horizontal — reunited katana stays in the band
-const PART = { in: 0.32, out: SETTLE_END, backIn: RETURN.in, backOut: RETURN.out } // settle → reverse parallel offset (scabbard rejoins blade)
-const FRAME = { in: 0.2, out: SETTLE_END, backIn: 1.5, backOut: 1.6 } // camera holds display framing (band stays put)
+const CLIP = { in: 0.0, out: 0.2, backIn: RESHEATHE_CLIP.in, backOut: RESHEATHE_CLIP.out } // unsheathe → STEP 2 reverse-scrub
+const POSE = { in: 0.2, out: 0.32, backIn: 1.5, backOut: 1.6 } // hold horizontal (clip-END pose orientation)
+const PART = { in: 0.32, out: SETTLE_END, backIn: RESHEATHE_OFFSET.in, backOut: RESHEATHE_OFFSET.out } // settle → STEP 1 reverse offset
+const FRAME = { in: 0.2, out: SETTLE_END, backIn: 1.5, backOut: 1.6 } // camera holds display framing
 const DRIFT = { a: 1.5, b: 1.6, c: 1.7, d: 1.8 } // drift bump disabled (was the dropped hold)
 
 /* ---- Object motion -------------------------------------------------------- */
@@ -100,7 +104,7 @@ const START_DRAWN = 0.12 // resting clip fraction at scroll 0 — opens mid-gest
 // Active during the unsheathe + resheathe (when the blade overlaps the bore); OFF
 // during the display, where the blade is fully drawn and must be entirely visible.
 const CLIP_DRAW_CLEAR = 0.3 // p ≤ this: clip ON (covers the unsheathe, blade clears by 0.2)
-const CLIP_RESHEATHE = RETURN.in // p ≥ this: clip ON again so the returning blade hides inside the sheath
+const CLIP_RESHEATHE = RESHEATHE_CLIP.in // p ≥ this: clip ON again so the returning blade hides inside the sheath
 
 /* ---- PETAL FIELD (Stage 1: drifting field + scroll-gated presence) ---------
  * A camera-locked instanced field of sakura petals spanning the hero + about.
@@ -358,6 +362,28 @@ function deriveAxes(scene: THREE.Object3D): Axes {
 
 const HERO_QUAT = new THREE.Quaternion() // identity = the authored diagonal hero pose
 
+// Localized pixel-dissolve injected into the SWORD's own materials: the sheathed katana
+// breaks into screen-space blocks confined to a horizontal band and discards them as the
+// dissolve grows — leaving the clean landscape behind, without touching anything else.
+const KDISS_GLSL_HEAD = `
+uniform float uKDissolve;
+uniform vec2 uRes;
+uniform float uBandCenter;
+uniform float uBandHalf;
+uniform float uBandFeather;
+uniform float uBlockPx;
+float kdHash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+`
+const KDISS_GLSL_BODY = `
+  if (uKDissolve > 0.0001) {
+    vec2 kdCell = floor(gl_FragCoord.xy / uBlockPx);
+    float kdN = kdHash(kdCell);
+    float kdY = gl_FragCoord.y / uRes.y;
+    float kdBand = 1.0 - smoothstep(uBandHalf, uBandHalf + uBandFeather, abs(kdY - uBandCenter));
+    if (kdN < uKDissolve * kdBand) discard;
+  }
+`
+
 // Data extracted from the built-in clip once it's loaded (sampled at its end pose).
 type ClipData = {
   mixer: THREE.AnimationMixer
@@ -389,6 +415,20 @@ function Katana({ axesRef, progressRef }: DriveProps) {
   // Clip plane: starts "open" (constant huge ⇒ nothing clipped) until driven each frame.
   const clipPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(1, 0, 0), 1e9), [])
 
+  // Shared uniforms for the sword's pixel-dissolve (mutated each frame; bound into
+  // every sword material's shader via onBeforeCompile below).
+  const dissolve = useMemo(
+    () => ({
+      uKDissolve: { value: 0 },
+      uRes: { value: new THREE.Vector2(1, 1) },
+      uBandCenter: { value: KBAND.center },
+      uBandHalf: { value: KBAND.half },
+      uBandFeather: { value: KBAND.feather },
+      uBlockPx: { value: KBLOCK_PX },
+    }),
+    []
+  )
+
   // Built-in clip, sampled for its end pose + the derived display/scabbard targets.
   const clipRef = useRef<ClipData | null>(null)
 
@@ -413,13 +453,20 @@ function Katana({ axesRef, progressRef }: DriveProps) {
         const c = m.clone()
         c.clippingPlanes = [clipPlane]
         c.clipShadows = true
+        // Inject the localized pixel-dissolve discard (shares `dissolve` uniforms).
+        c.onBeforeCompile = (shader) => {
+          Object.assign(shader.uniforms, dissolve)
+          shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', `#include <common>\n${KDISS_GLSL_HEAD}`)
+            .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${KDISS_GLSL_BODY}`)
+        }
         return c
       }
       mesh.material = Array.isArray(mesh.material)
         ? mesh.material.map(bind)
         : bind(mesh.material)
     })
-  }, [axes, gl, clipPlane])
+  }, [axes, gl, clipPlane, dissolve])
 
   // Set up the built-in unsheathe clip: pause it (we scrub by scroll), and SAMPLE its
   // end pose so the parallel layout + display orientation hand off with no jump.
@@ -475,9 +522,13 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     cd.action.time = frac * cd.duration
     cd.mixer.update(0) // applies the blade pose for this clip time
 
-    // REMOVE the katana during the glitch-in: once the one-color glitch has taken over
-    // the screen, hide the whole sheathed katana so nothing lingers over the projects.
-    heroRef.current.visible = smoothstep(LAND_REVEAL.in, LAND_REVEAL.out, p) < KATANA_HIDE
+    // PHASE 2 — the sheathed katana PIXELS OUT (localized block-discard). Keep it sized
+    // to the drawing buffer so gl_FragCoord maths line up; hide once fully dissolved so
+    // nothing lingers over the projects rows.
+    const kdiss = smoothstep(KDISS.in, KDISS.out, p)
+    dissolve.uKDissolve.value = kdiss
+    dissolve.uRes.value.set(gl.domElement.width, gl.domElement.height)
+    heroRef.current.visible = kdiss < 1
 
     // SCABBARD: glide rest → parallel target (under the drawn blade + drop) by part(p).
     const part = plateau(p, PART.in, PART.out, PART.backIn, PART.backOut)
@@ -890,7 +941,7 @@ function makeLabelTexture(text: string) {
   ;(ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = '14px'
   ctx.fillText(text, c.width / 2, c.height / 2 + 6)
   const t = new THREE.CanvasTexture(c)
-  t.colorSpace = THREE.SRGBColorSpace
+  t.colorSpace = THREE.NoColorSpace // raw passthrough — matches the landscape layer
   t.needsUpdate = true
   return t
 }
@@ -900,7 +951,9 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
   const { size } = useThree()
 
   useMemo(() => {
-    tex.colorSpace = THREE.SRGBColorSpace
+    // RAW passthrough: NoColorSpace ⇒ the GPU does NOT linearize on sample, and the raw
+    // ShaderMaterial writes the value straight out ⇒ the canvas shows the EXACT file colors.
+    tex.colorSpace = THREE.NoColorSpace
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping
     tex.minFilter = THREE.LinearFilter
     tex.magFilter = THREE.LinearFilter
@@ -921,8 +974,10 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
       uLabelIn: { value: 0 },
       uVanish: { value: 0 },
       uBlocks: { value: LAND_BLOCKS },
-      uInColor: { value: new THREE.Color(LAND_IN_COLOR) },
-      uOutColor: { value: new THREE.Color(LAND_OUT_COLOR) },
+      // raw sRGB values (LinearSRGBColorSpace = stored as-is, no conversion) so the
+      // glitch tones match the raw image / the #0A0A0A rows bg exactly.
+      uInColor: { value: new THREE.Color().setStyle(LAND_IN_COLOR, THREE.LinearSRGBColorSpace) },
+      uOutColor: { value: new THREE.Color().setStyle(LAND_OUT_COLOR, THREE.LinearSRGBColorSpace) },
       uPan: { value: new THREE.Vector2(0, 0) },
     }),
     [tex, labelTex]
@@ -938,7 +993,8 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
     const ctx = c.getContext('2d')!
     ctx.drawImage(img, 0, 0, 1, 1)
     const d = ctx.getImageData(0, 0, 1, 1).data
-    uniforms.uInColor.value.setRGB(d[0] / 255, d[1] / 255, d[2] / 255, THREE.SRGBColorSpace)
+    // store raw (LinearSRGB = no conversion) to match the raw-passthrough landscape
+    uniforms.uInColor.value.setRGB(d[0] / 255, d[1] / 255, d[2] / 255, THREE.LinearSRGBColorSpace)
   }, [tex, uniforms])
 
   // Mouse position in [-1,1] (left/bottom = -1) — drives the pan toward the cropped edges.
