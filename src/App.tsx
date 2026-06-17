@@ -60,31 +60,35 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0)
 //  0.87–1.00  full parallel held → unpin → normal scroll
 const SETTLE_END = 0.87 // full parallel = last About beat lands
 
-/* ---- STAGE 2: ABOUT → PROJECTS transition (StringTune localized dissolve) ---
- * After the last beat, scrolling further re-sheathes the katana (reverse-scrub of
- * the SAME built-in clip + reverse of the parallel offset — exact reverse, no
- * reconstruction) WHILE it PIXEL-DISSOLVES: the sword breaks into screen-space
- * blocks confined to its own horizontal band and vanishes, revealing the CLEAN,
- * vibrant landscape behind it (the landscape is NEVER glitched or darkened).
- * Then a small "projects" label appears on the clean landscape, and the landscape
- * + label do the SAME quick pixel-dissolve to hand off to the rows section.
+/* ---- STAGE 2: ABOUT → PROJECTS transition (exact ordered sequence) ----------
+ * PHASE 1  re-sheathe BOTH pieces: reverse the parallel offset (scabbard, via PART)
+ *          AND reverse-scrub the clip (blade slides INTO the scabbard, via CLIP) so
+ *          they REUNITE into one sheathed katana — completes BEFORE the glitch.
+ * PHASE 2  glitch-IN: blocks of ONE image-toned color resolve into the CLEAN, vibrant
+ *          landscape; the sheathed katana is simply REMOVED during the glitch (no
+ *          separate animation — hidden under the glitch, gone from then on).
+ * PHASE 3  small "projects" label resolves with a clean blur-to-sharp.
+ * PHASE 4  glitch-OUT: blocks of ONE bg color (#0A0A0A) vanish into the rows section.
+ * PHASE 5  plain dark (#0A0A0A) rows section — empty placeholders, no katana/landscape.
  */
-const RETURN = { in: 0.87, out: 0.925 } // katana reverse clip-scrub + reverse parallel offset
-const KDISS = { in: 0.885, out: 0.93 } // localized katana pixel-dissolve
-const KBAND = { center: 0.5, half: 0.27, feather: 0.1 } // dissolve band (fraction of viewport height)
-const KBLOCK_PX = 22 // dissolve block size in device px
-const PETAL_FADE = { in: 0.88, out: 0.92 } // petals fade out as the sword dissolves
-const LAND_APPEAR = { in: 0.885, out: 0.915 } // CLEAN landscape fades in behind the dissolving sword
-const LABEL_IN = { in: 0.935, out: 0.96 } // small "projects" label resolves in on the clean landscape
-const LAND_DISS = { in: 0.965, out: 0.995 } // landscape + label pixel-dissolve away
-const ROWS_IN = { in: 0.97, out: 0.998 } // plain dark (#0A0A0A) rows section revealed behind
-const ABOUT_CLEAR = { in: 0.86, out: 0.89 } // about beats clear as the zone begins
+const RETURN = { in: 0.87, out: 0.9 } // PHASE 1: reverse parallel offset (scabbard) + reverse clip (blade)
+const LAND_REVEAL = { in: 0.9, out: 0.93 } // PHASE 2: one-color glitch-in resolves the clean landscape
+const KATANA_HIDE = 0.4 // remove the katana once the glitch-in passes this fraction
+const LABEL_IN = { in: 0.955, out: 0.975 } // PHASE 3: "projects" label clean blur-to-sharp
+const LAND_VANISH = { in: 0.978, out: 0.998 } // PHASE 4: one-color glitch-out — label + landscape vanish
+const ROWS_IN = { in: 0.982, out: 1.0 } // PHASE 5: plain dark rows section revealed
+const LAND_BLOCKS = 24 // landscape glitch block count (vertical)
+const LAND_IN_COLOR = '#6f7e8c' // fallback glitch-in tone (overwritten by the image's average)
+const LAND_OUT_COLOR = '#0a0a0a' // glitch-out tone = projects section bg
+const PAN_STRENGTH = 0.95 // how far the mouse pans into the cropped image margin (1 = full)
+const PETAL_FADE = { in: 0.875, out: 0.905 } // petals clear as the katana re-sheathes
+const ABOUT_CLEAR = { in: 0.855, out: 0.885 } // about beats clear as the zone begins
 const LANDSCAPE_URL = '/Ukiyo-e_Landscape_Jun_17_2026.png'
 const LAND_IMG_ASPECT = 1915 / 821
 
-const CLIP = { in: 0.0, out: 0.2, backIn: RETURN.in, backOut: RETURN.out } // unsheathe → reverse-scrub resheathe
-const POSE = { in: 0.2, out: 0.32, backIn: 1.5, backOut: 1.6 } // hold horizontal — stays in the band, never rotates back
-const PART = { in: 0.32, out: SETTLE_END, backIn: RETURN.in, backOut: RETURN.out } // settle → reverse parallel offset
+const CLIP = { in: 0.0, out: 0.2, backIn: RETURN.in, backOut: RETURN.out } // unsheathe → reverse-scrub: blade slides INTO sheath
+const POSE = { in: 0.2, out: 0.32, backIn: 1.5, backOut: 1.6 } // hold horizontal — reunited katana stays in the band
+const PART = { in: 0.32, out: SETTLE_END, backIn: RETURN.in, backOut: RETURN.out } // settle → reverse parallel offset (scabbard rejoins blade)
 const FRAME = { in: 0.2, out: SETTLE_END, backIn: 1.5, backOut: 1.6 } // camera holds display framing (band stays put)
 const DRIFT = { a: 1.5, b: 1.6, c: 1.7, d: 1.8 } // drift bump disabled (was the dropped hold)
 
@@ -354,29 +358,6 @@ function deriveAxes(scene: THREE.Object3D): Axes {
 
 const HERO_QUAT = new THREE.Quaternion() // identity = the authored diagonal hero pose
 
-// Localized pixel-dissolve injected into the SWORD's own materials: the blade breaks
-// into screen-space blocks confined to a horizontal band and discards them as the
-// dissolve grows — revealing the clean landscape behind WITHOUT touching anything
-// outside the sword (no full-screen pixelation, no darkening).
-const KDISS_GLSL_HEAD = `
-uniform float uKDissolve;
-uniform vec2 uRes;
-uniform float uBandCenter;
-uniform float uBandHalf;
-uniform float uBandFeather;
-uniform float uBlockPx;
-float kdHash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
-`
-const KDISS_GLSL_BODY = `
-  if (uKDissolve > 0.0001) {
-    vec2 kdCell = floor(gl_FragCoord.xy / uBlockPx);
-    float kdN = kdHash(kdCell);
-    float kdY = gl_FragCoord.y / uRes.y;
-    float kdBand = 1.0 - smoothstep(uBandHalf, uBandHalf + uBandFeather, abs(kdY - uBandCenter));
-    if (kdN < uKDissolve * kdBand) discard;
-  }
-`
-
 // Data extracted from the built-in clip once it's loaded (sampled at its end pose).
 type ClipData = {
   mixer: THREE.AnimationMixer
@@ -408,20 +389,6 @@ function Katana({ axesRef, progressRef }: DriveProps) {
   // Clip plane: starts "open" (constant huge ⇒ nothing clipped) until driven each frame.
   const clipPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(1, 0, 0), 1e9), [])
 
-  // Shared uniforms for the sword's pixel-dissolve (mutated each frame; bound into
-  // every sword material's shader via onBeforeCompile below).
-  const dissolve = useMemo(
-    () => ({
-      uKDissolve: { value: 0 },
-      uRes: { value: new THREE.Vector2(1, 1) },
-      uBandCenter: { value: KBAND.center },
-      uBandHalf: { value: KBAND.half },
-      uBandFeather: { value: KBAND.feather },
-      uBlockPx: { value: KBLOCK_PX },
-    }),
-    []
-  )
-
   // Built-in clip, sampled for its end pose + the derived display/scabbard targets.
   const clipRef = useRef<ClipData | null>(null)
 
@@ -446,20 +413,13 @@ function Katana({ axesRef, progressRef }: DriveProps) {
         const c = m.clone()
         c.clippingPlanes = [clipPlane]
         c.clipShadows = true
-        // Inject the localized pixel-dissolve discard (shares `dissolve` uniforms).
-        c.onBeforeCompile = (shader) => {
-          Object.assign(shader.uniforms, dissolve)
-          shader.fragmentShader = shader.fragmentShader
-            .replace('#include <common>', `#include <common>\n${KDISS_GLSL_HEAD}`)
-            .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${KDISS_GLSL_BODY}`)
-        }
         return c
       }
       mesh.material = Array.isArray(mesh.material)
         ? mesh.material.map(bind)
         : bind(mesh.material)
     })
-  }, [axes, gl, clipPlane, dissolve])
+  }, [axes, gl, clipPlane])
 
   // Set up the built-in unsheathe clip: pause it (we scrub by scroll), and SAMPLE its
   // end pose so the parallel layout + display orientation hand off with no jump.
@@ -515,10 +475,9 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     cd.action.time = frac * cd.duration
     cd.mixer.update(0) // applies the blade pose for this clip time
 
-    // PIXEL-DISSOLVE: drive the sword's localized block-discard + keep it sized to the
-    // drawing buffer so gl_FragCoord maths line up.
-    dissolve.uKDissolve.value = smoothstep(KDISS.in, KDISS.out, p)
-    dissolve.uRes.value.set(gl.domElement.width, gl.domElement.height)
+    // REMOVE the katana during the glitch-in: once the one-color glitch has taken over
+    // the screen, hide the whole sheathed katana so nothing lingers over the projects.
+    heroRef.current.visible = smoothstep(LAND_REVEAL.in, LAND_REVEAL.out, p) < KATANA_HIDE
 
     // SCABBARD: glide rest → parallel target (under the drawn blade + drop) by part(p).
     const part = plateau(p, PART.in, PART.out, PART.backIn, PART.backOut)
@@ -848,14 +807,32 @@ const LAND_FRAG = /* glsl */ `
   uniform vec2 uRes;
   uniform float uImgAspect;
   uniform float uLabelAspect;
-  uniform float uAlpha;    // clean landscape presence
-  uniform float uLabelIn;  // "projects" label presence
   uniform float uLabelH;   // label height (fraction of viewport)
-  uniform float uDissolve; // landscape + label pixel-dissolve away
-  uniform float uBlockPx;
+  uniform float uReveal;   // PHASE 2: one-color glitch-IN (0 → clean landscape resolved)
+  uniform float uLabelIn;  // PHASE 3: label clean blur-to-sharp
+  uniform float uVanish;   // PHASE 4: one-color glitch-OUT (label + landscape vanish)
+  uniform float uBlocks;   // block count (vertical)
+  uniform vec3 uInColor;   // single glitch-in tone (image average)
+  uniform vec3 uOutColor;  // single glitch-out tone (projects bg)
+  uniform vec2 uPan;       // mouse pan offset into the cropped image margin
   varying vec2 vUv;
 
   float lHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+  float lSmoother(float t) { t = clamp(t, 0.0, 1.0); return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+
+  // 9-tap blur of the label texture → clean blur-to-sharp (never garbled).
+  vec4 labelBlur(vec2 uv, float r) {
+    vec4 s = texture2D(uLabel, uv);
+    s += texture2D(uLabel, uv + vec2(r, 0.0));
+    s += texture2D(uLabel, uv + vec2(-r, 0.0));
+    s += texture2D(uLabel, uv + vec2(0.0, r));
+    s += texture2D(uLabel, uv + vec2(0.0, -r));
+    s += texture2D(uLabel, uv + vec2(r, r));
+    s += texture2D(uLabel, uv + vec2(-r, -r));
+    s += texture2D(uLabel, uv + vec2(r, -r));
+    s += texture2D(uLabel, uv + vec2(-r, r));
+    return s / 9.0;
+  }
 
   void main() {
     float canvasAspect = uRes.x / uRes.y;
@@ -863,23 +840,37 @@ const LAND_FRAG = /* glsl */ `
     vec2 s = canvasAspect > uImgAspect
       ? vec2(1.0, uImgAspect / canvasAspect)
       : vec2(canvasAspect / uImgAspect, 1.0);
-    vec2 uvc = (vUv - 0.5) * s + 0.5;
-    vec3 col = texture2D(uTex, uvc).rgb;
+    // cover-fit + MOUSE PAN: slide the sampled window within the cropped margin so the
+    // user can peek at the image portion cropped off each edge.
+    vec2 uvc = (vUv - 0.5) * s + 0.5 + uPan;
+    vec3 img = texture2D(uTex, clamp(uvc, 0.0001, 0.9999)).rgb;
 
-    // small centered "projects" label, aspect-preserved (no stretch).
+    // Screen-space block grid (stable — pan doesn't move the blocks).
+    vec2 cells = vec2(uBlocks * canvasAspect, uBlocks);
+    vec2 cellId = floor(vUv * cells);
+
+    // PHASE 2 glitch-IN: each block flips from ONE image-toned color → the real image.
+    float resolved = step(lHash(cellId + 5.0), smoothstep(0.45, 1.0, uReveal));
+    vec3 col = mix(uInColor, img, resolved);
+
+    // PHASE 3 label — clean blur-to-sharp, aspect-preserved, centered.
     vec2 lsize = vec2(uLabelH * uLabelAspect / canvasAspect, uLabelH);
     vec2 luv = (vUv - 0.5) / lsize + 0.5;
     if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) {
-      vec4 lab = texture2D(uLabel, luv);
-      col = mix(col, lab.rgb, lab.a * uLabelIn);
+      float li = lSmoother(uLabelIn);
+      vec4 lab = labelBlur(luv, (1.0 - li) * 0.03);
+      col = mix(col, lab.rgb, lab.a * li);
     }
 
-    // PIXEL-DISSOLVE: whole-screen blocks vanish as uDissolve grows → reveal rows.
-    vec2 cell = floor(gl_FragCoord.xy / uBlockPx);
-    float n = lHash(cell);
-    float alive = 1.0 - step(n, uDissolve);
+    // PHASE 4 glitch-OUT: each block flips to ONE bg color, then is removed → rows.
+    float toBg = step(lHash(cellId + 5.0), smoothstep(0.0, 0.85, uVanish));
+    col = mix(col, uOutColor, toBg);
 
-    gl_FragColor = vec4(col, uAlpha * alive);
+    // Per-block alpha: appears (in) blockwise, vanishes (out) blockwise.
+    float appear = step(lHash(cellId + 3.0), smoothstep(0.0, 0.7, uReveal));
+    float gone = step(lHash(cellId + 9.0), uVanish);
+
+    gl_FragColor = vec4(col, appear * (1.0 - gone));
   }
 `
 
@@ -925,21 +916,58 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
       uRes: { value: new THREE.Vector2(1, 1) },
       uImgAspect: { value: LAND_IMG_ASPECT },
       uLabelAspect: { value: LABEL_CANVAS_ASPECT },
-      uAlpha: { value: 0 },
-      uLabelIn: { value: 0 },
       uLabelH: { value: 0.07 },
-      uDissolve: { value: 0 },
-      uBlockPx: { value: KBLOCK_PX },
+      uReveal: { value: 0 },
+      uLabelIn: { value: 0 },
+      uVanish: { value: 0 },
+      uBlocks: { value: LAND_BLOCKS },
+      uInColor: { value: new THREE.Color(LAND_IN_COLOR) },
+      uOutColor: { value: new THREE.Color(LAND_OUT_COLOR) },
+      uPan: { value: new THREE.Vector2(0, 0) },
     }),
     [tex, labelTex]
   )
 
-  useFrame(() => {
+  // glitch-in tone = the image's AVERAGE color (one color "similar to the image"),
+  // read by downscaling the loaded image to 1×1.
+  useEffect(() => {
+    const img = tex.image as HTMLImageElement | undefined
+    if (!img) return
+    const c = document.createElement('canvas')
+    c.width = c.height = 1
+    const ctx = c.getContext('2d')!
+    ctx.drawImage(img, 0, 0, 1, 1)
+    const d = ctx.getImageData(0, 0, 1, 1).data
+    uniforms.uInColor.value.setRGB(d[0] / 255, d[1] / 255, d[2] / 255, THREE.SRGBColorSpace)
+  }, [tex, uniforms])
+
+  // Mouse position in [-1,1] (left/bottom = -1) — drives the pan toward the cropped edges.
+  const mouse = useMemo(() => new THREE.Vector2(0, 0), [])
+  const panTarget = useMemo(() => new THREE.Vector2(0, 0), [])
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      mouse.set((e.clientX / window.innerWidth) * 2 - 1, 1 - (e.clientY / window.innerHeight) * 2)
+    }
+    window.addEventListener('pointermove', onMove)
+    return () => window.removeEventListener('pointermove', onMove)
+  }, [mouse])
+
+  useFrame((_, dt) => {
     const p = progressRef.current
     uniforms.uRes.value.set(size.width, size.height)
-    uniforms.uAlpha.value = smoothstep(LAND_APPEAR.in, LAND_APPEAR.out, p)
+    uniforms.uReveal.value = smoothstep(LAND_REVEAL.in, LAND_REVEAL.out, p)
     uniforms.uLabelIn.value = smoothstep(LABEL_IN.in, LABEL_IN.out, p)
-    uniforms.uDissolve.value = smoothstep(LAND_DISS.in, LAND_DISS.out, p)
+    uniforms.uVanish.value = smoothstep(LAND_VANISH.in, LAND_VANISH.out, p)
+
+    // Pan within the cropped margin only — and only while the clean landscape is up.
+    const aspect = size.width / size.height
+    const sx = aspect > LAND_IMG_ASPECT ? 1 : aspect / LAND_IMG_ASPECT
+    const sy = aspect > LAND_IMG_ASPECT ? LAND_IMG_ASPECT / aspect : 1
+    const marginX = (1 - sx) * 0.5 * PAN_STRENGTH
+    const marginY = (1 - sy) * 0.5 * PAN_STRENGTH
+    const live = uniforms.uReveal.value * (1 - uniforms.uVanish.value)
+    panTarget.set(mouse.x * marginX * live, mouse.y * marginY * live)
+    uniforms.uPan.value.lerp(panTarget, 1 - Math.exp(-6 * dt)) // frame-rate-independent ease
   })
 
   return (
@@ -1187,7 +1215,7 @@ export default function App() {
           camera={{ position: HERO_OFF.toArray(), fov: FOV, near: 0.1, far: 100 }}
         >
           <Suspense fallback={null}>
-            <ScrollControls pages={5}>
+            <ScrollControls pages={6}>
               <Scene axesRef={axesRef} progressRef={progressRef} />
             </ScrollControls>
           </Suspense>
