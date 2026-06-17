@@ -590,21 +590,43 @@ const ABOUT = { a: 0.33, b: 0.38, c: 0.41, d: 0.45 } // "About" — blade fully 
 // next fades IN, and is PINNED in clear space: ABOVE/BELOW while the sword is still wide,
 // LEFT/RIGHT once it narrows into parallel bars. The 6th holds until full parallel.
 const BEATS = [
-  { id: 1, zone: 'ABOVE', a: 0.46, b: 0.482, c: 0.515, d: 0.533 },
-  { id: 2, zone: 'BELOW', a: 0.54, b: 0.562, c: 0.589, d: 0.607 },
-  { id: 3, zone: 'ABOVE', a: 0.614, b: 0.636, c: 0.662, d: 0.68 },
-  { id: 4, zone: 'LEFT', a: 0.687, b: 0.709, c: 0.736, d: 0.753 },
-  { id: 5, zone: 'RIGHT', a: 0.76, b: 0.782, c: 0.809, d: 0.827 },
-  { id: 6, zone: 'LEFT', a: 0.834, b: 0.86, c: 1.1, d: 1.2 }, // holds to full parallel
+  { id: 1, zone: 'ABOVE', a: 0.46, b: 0.482, c: 0.515, d: 0.533,
+    eyebrow: '01 — WHO', maxW: 'max-w-none', // ABOVE: full-spaced, no cap
+    body: 'Abhayanth K. Artificial Intelligence & Computer Science at Rishihood University, graduating 2028.' },
+  { id: 2, zone: 'BELOW', a: 0.54, b: 0.562, c: 0.589, d: 0.607,
+    eyebrow: '02 — WHAT I BUILD', maxW: 'max-w-none', // BELOW: full-spaced, no cap
+    body: 'Full-stack, AI-powered products, shipped end to end on Next.js, TypeScript, and Tailwind.' },
+  { id: 3, zone: 'ABOVE', a: 0.614, b: 0.636, c: 0.662, d: 0.68,
+    eyebrow: '03 — THE BUILDS', maxW: 'max-w-none', // ABOVE: full-spaced, no cap
+    body: 'A multi-agent retention engine. An LLM API gateway. A productivity platform. And Nextflow — AI workflow automation on trigger.dev, DAG-orchestrated.' },
+  { id: 4, zone: 'LEFT', a: 0.687, b: 0.709, c: 0.736, d: 0.753,
+    eyebrow: '04 — THE EDGE', maxW: 'max-w-[min(36rem,84vw)]',
+    body: 'Codeforces Specialist. 1600+ problems solved. Algorithms kept sharp, daily.' },
+  { id: 5, zone: 'RIGHT', a: 0.76, b: 0.782, c: 0.809, d: 0.827,
+    eyebrow: '05 — OFF THE CLOCK', maxW: 'max-w-[min(36rem,84vw)]',
+    body: 'ICPC preliminary rounds. Chess at 1400+ — the same hunt for the cleanest line.' },
+  { id: 6, zone: 'LEFT', a: 0.834, b: 0.86, c: 1.1, d: 1.2, // holds to full parallel
+    eyebrow: '06', maxW: 'max-w-[min(36rem,84vw)]',
+    body: 'Still sharpening.' },
 ] as const
 
 // Placement wrapper per zone — flex-centers the beat so its driven child carries ONLY a
 // scale transform (no positional transform to fight). Pinned: it never moves once placed.
 const ZONE_WRAP: Record<string, string> = {
-  ABOVE: 'absolute inset-x-0 top-[15vh] flex justify-center',
-  BELOW: 'absolute inset-x-0 bottom-[15vh] flex justify-center',
+  ABOVE: 'absolute inset-x-0 top-[15vh] px-[6vw] flex justify-start',
+  BELOW: 'absolute inset-x-0 bottom-[15vh] px-[6vw] flex justify-start',
   LEFT: 'absolute inset-y-0 left-[7vw] flex flex-col justify-center items-start',
   RIGHT: 'absolute inset-y-0 right-[7vw] flex flex-col justify-center items-end',
+}
+
+// Beat block layout per zone. ABOVE/BELOW span the FULL width and read left→right
+// (full-spaced, never a centered column); LEFT/RIGHT stay edge-aligned narrow bars
+// beside the parallel blade.
+const ZONE_ALIGN: Record<string, string> = {
+  ABOVE: 'w-full items-start text-left',
+  BELOW: 'w-full items-start text-left',
+  LEFT: 'items-start text-left',
+  RIGHT: 'items-end text-right',
 }
 
 export default function App() {
@@ -641,9 +663,18 @@ export default function App() {
         el.style.opacity = `${t}`
         el.style.transform = `scale(${0.9 + 0.1 * t})`
       }
+      // Cue reveal (StringTune feel): an extra smoothstep weights the easing, then the
+      // text fades while sliding up under a clean mask wipe — eases in, never pops.
+      const driveCue = (el: HTMLElement | null | undefined, t: number) => {
+        if (!el) return
+        const e = t * t * (3 - 2 * t)
+        el.style.opacity = `${e}`
+        el.style.transform = `translateY(${(1 - e) * 0.45}em)`
+        el.style.clipPath = `inset(${(1 - e) * 105}% 0 -5% 0)`
+      }
       const cue = plateau(p, CUE.a, CUE.b, CUE.c, CUE.d)
-      drive(concentrateRef.current, cue)
-      drive(scrollCueRef.current, cue)
+      driveCue(concentrateRef.current, cue)
+      driveCue(scrollCueRef.current, cue)
       drive(aboutRef.current, plateau(p, ABOUT.a, ABOUT.b, ABOUT.c, ABOUT.d))
       for (let i = 0; i < BEATS.length; i++) {
         const b = BEATS[i]
@@ -750,31 +781,34 @@ export default function App() {
         <div
           ref={concentrateRef}
           style={{ opacity: 0 }}
-          className="absolute top-[36vh] left-[10vw] origin-top-left font-dramatic italic font-light text-[clamp(2rem,5vw,4.5rem)] tracking-[0.08em] uppercase text-washi/40 leading-none"
+          className="absolute top-[36vh] left-[10vw] font-display font-medium text-[clamp(0.95rem,1.9vw,1.6rem)] tracking-[0.4em] uppercase text-washi/45 leading-none"
         >
           Concentrate
         </div>
         <div
           ref={scrollCueRef}
           style={{ opacity: 0 }}
-          className="absolute bottom-[34vh] right-[8vw] origin-bottom-right font-dramatic italic font-light text-[clamp(2rem,5vw,4.5rem)] tracking-[0.08em] uppercase text-washi/40 leading-none"
+          className="absolute bottom-[34vh] right-[8vw] font-display font-medium text-[clamp(0.95rem,1.9vw,1.6rem)] tracking-[0.4em] uppercase text-washi/45 leading-none"
         >
           Scroll down
         </div>
 
-        {/* ABOUT — arrives once the blade is fully drawn, still wide/spread */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <div ref={aboutRef} style={{ opacity: 0 }} className="flex flex-col items-center gap-4">
-            <span className="font-display font-black tracking-[-0.03em] leading-none text-[clamp(3rem,9vw,7rem)]">
-              About
-            </span>
+        {/* ABOUT — arrives once the blade is fully drawn. Section title pinned near the
+            TOP; the scroll indicator sits at the BOTTOM CENTER (clear vertical split). */}
+        <div ref={aboutRef} style={{ opacity: 0 }} className="absolute inset-0">
+          <span className="absolute top-[12vh] left-1/2 -translate-x-1/2 font-display font-black tracking-[-0.03em] leading-none text-[clamp(3rem,9vw,7rem)]">
+            About
+          </span>
+          <div className="absolute bottom-[6vh] left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
             <span className="font-mono text-[0.62rem] tracking-[0.28em] uppercase text-washi/45">
               scroll down
             </span>
+            <span className="block w-px h-9 bg-linear-to-b from-washi/55 to-transparent" />
           </div>
         </div>
 
-        {/* BEATS — one at a time, each PINNED in clear space (placeholders) */}
+        {/* BEATS — one at a time, each PINNED in clear space. Monospace instrument-panel
+            eyebrow over a clean display body; reveal/placement unchanged. */}
         {BEATS.map((b, i) => (
           <div key={b.id} className={ZONE_WRAP[b.zone]}>
             <div
@@ -782,9 +816,14 @@ export default function App() {
                 beatRefs.current[i] = el
               }}
               style={{ opacity: 0 }}
-              className="font-mono tracking-[0.18em] uppercase text-washi/80 text-[clamp(0.8rem,1.5vw,1.1rem)]"
+              className={`flex flex-col gap-3 ${b.maxW} ${ZONE_ALIGN[b.zone]}`}
             >
-              Beat {b.id} <span className="text-gold/70">/ {b.zone}</span>
+              <span className="font-mono text-[0.72rem] tracking-[0.24em] uppercase text-gold/90">
+                {b.eyebrow}
+              </span>
+              <p className="font-display font-medium leading-[1.14] tracking-[-0.01em] text-washi text-[clamp(1.35rem,2.9vw,2.5rem)]">
+                {b.body}
+              </p>
             </div>
           </div>
         ))}
