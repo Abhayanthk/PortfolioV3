@@ -1,3 +1,9 @@
 node_modules
 dist
 *.log
+
+# Local AI agent tooling — keep out of repo
+.agent/
+.agents/
+.claude/
+skills-lock.json

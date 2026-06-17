@@ -93,6 +93,10 @@ function smoothstep(edge0: number, edge1: number, x: number) {
   return t * t * (3 - 2 * t)
 }
 
+// Perlin smootherstep — heavier, more weighted ease than smoothstep (slow in AND
+// out). Drives the cinematic blur-to-sharp focus-pull so reveals never pop.
+const smoother = (t: number) => t * t * t * (t * (t * 6 - 15) + 10)
+
 // 0→1→0 plateau: up across [a,b], hold, down across [c,d].
 const plateau = (p: number, a: number, b: number, c: number, d: number) =>
   clamp01(smoothstep(a, b, p) - smoothstep(c, d, p))
@@ -637,6 +641,7 @@ export default function App() {
   const nameLayerRef = useRef<HTMLDivElement>(null) // wordmark layer
   const hudRef = useRef<HTMLDivElement>(null) // tagline / nav / corners
   const pctRef = useRef<HTMLSpanElement>(null)
+  const progressFillRef = useRef<HTMLSpanElement>(null) // live scroll rail fill
 
   // ABOUT overlay refs (STAGE 1) — fade/scale in place, driven below.
   const concentrateRef = useRef<HTMLDivElement>(null)
@@ -656,29 +661,26 @@ export default function App() {
       if (nameLayerRef.current) nameLayerRef.current.style.transform = rise
       if (hudRef.current) hudRef.current.style.transform = rise
       if (pctRef.current) pctRef.current.textContent = `${Math.round(clamp01(p) * 100)}`.padStart(3, '0')
+      if (progressFillRef.current) progressFillRef.current.style.height = `${clamp01(p) * 100}%`
 
-      // ABOUT overlay — fade + subtle scale in place from the shared progress.
-      const drive = (el: HTMLElement | null | undefined, t: number) => {
+      // ONE blur-to-sharp focus-pull — shared by EVERY About-section text (cues, title,
+      // beats) so the whole section speaks one animation language. Weighted smootherstep
+      // ties the resolve to scroll: heavy blur + ghosted → sharp + opaque, with a whisper
+      // of push-in. Slow in/out, never an abrupt pop (StringTune's unhurried pace).
+      const driveFocus = (el: HTMLElement | null | undefined, t: number) => {
         if (!el) return
-        el.style.opacity = `${t}`
-        el.style.transform = `scale(${0.9 + 0.1 * t})`
-      }
-      // Cue reveal (StringTune feel): an extra smoothstep weights the easing, then the
-      // text fades while sliding up under a clean mask wipe — eases in, never pops.
-      const driveCue = (el: HTMLElement | null | undefined, t: number) => {
-        if (!el) return
-        const e = t * t * (3 - 2 * t)
+        const e = smoother(clamp01(t))
         el.style.opacity = `${e}`
-        el.style.transform = `translateY(${(1 - e) * 0.45}em)`
-        el.style.clipPath = `inset(${(1 - e) * 105}% 0 -5% 0)`
+        el.style.filter = `blur(${(1 - e) * 14}px)`
+        el.style.transform = `scale(${0.992 + 0.008 * e})`
       }
       const cue = plateau(p, CUE.a, CUE.b, CUE.c, CUE.d)
-      driveCue(concentrateRef.current, cue)
-      driveCue(scrollCueRef.current, cue)
-      drive(aboutRef.current, plateau(p, ABOUT.a, ABOUT.b, ABOUT.c, ABOUT.d))
+      driveFocus(concentrateRef.current, cue)
+      driveFocus(scrollCueRef.current, cue)
+      driveFocus(aboutRef.current, plateau(p, ABOUT.a, ABOUT.b, ABOUT.c, ABOUT.d))
       for (let i = 0; i < BEATS.length; i++) {
         const b = BEATS[i]
-        drive(beatRefs.current[i], plateau(p, b.a, b.b, b.c, b.d))
+        driveFocus(beatRefs.current[i], plateau(p, b.a, b.b, b.c, b.d))
       }
       raf = requestAnimationFrame(tick)
     }
@@ -731,31 +733,18 @@ export default function App() {
 
       {/* Layer 2 — HUD instrument panel, ABOVE the canvas. Scrolls up with the block. */}
       <div ref={hudRef} className="fixed inset-0 z-10 pointer-events-none text-washi">
-        {/* top-left — monogram + tagline */}
-        <div className="absolute top-6 left-6 md:top-10 md:left-10">
-          <div className="text-2xl leading-none text-gold mb-3.5">鍛</div>
-          <div className="font-display font-bold leading-[1.06] tracking-[-0.015em] text-[clamp(1rem,1.65vw,1.5rem)]">
-            Building software.
-            <br />
-            Sharpening algorithms.
-          </div>
+        {/* top-left — hero tagline (monogram now lives in the sticky top bar). Sits
+            BELOW the bar so it clears it, then scrolls up/away with the hero block. */}
+        <div className="absolute top-24 left-6 md:top-28 md:left-10 font-display font-bold leading-[1.06] tracking-[-0.015em] text-[clamp(1rem,1.65vw,1.5rem)]">
+          Building software.
+          <br />
+          Sharpening algorithms.
         </div>
 
         {/* top-center — build tag */}
         <div className={`absolute top-6 md:top-10 left-1/2 -translate-x-1/2 ${MONO}`}>V_1.0.0</div>
 
-        {/* top-right — live scroll % + nav pills */}
-        <div className="absolute top-6 right-6 md:top-10 md:right-10 flex flex-col items-end gap-4">
-          <div className="font-mono text-[0.72rem] tracking-[0.2em] text-gold">
-            <span ref={pctRef}>000</span>%
-          </div>
-          <nav className="flex gap-1.5">
-            <span className={`${PILL} border-gold/50 text-gold`}>About</span>
-            <span className={`${PILL} border-washi/15 text-washi/70`}>Projects</span>
-            <span className={`${PILL} border-washi/15 text-washi/70`}>CP</span>
-            <span className={`${PILL} border-washi/15 text-washi/70`}>Contact</span>
-          </nav>
-        </div>
+        {/* (top-right nav → sticky top bar · live scroll % → instrument panel) */}
 
         {/* bottom-left — role descriptor */}
         <div className={`absolute bottom-6 left-6 md:bottom-10 md:left-10 ${MONO}`}>
@@ -828,6 +817,44 @@ export default function App() {
           </div>
         ))}
       </div>
+
+      {/* Persistent instrument panel — quiet margin detail, FIXED, never scrolls, so the
+          corners always carry low-contrast detail instead of bare black. Same monospace
+          language as the hero corners: section label, faint vertical kanji, live scroll rail. */}
+      <div className="fixed inset-0 z-[15] pointer-events-none font-mono text-washi/25 select-none">
+        {/* left edge — section label + faint vertical kanji column */}
+        <div className="absolute left-[1.6vw] top-1/2 -translate-y-1/2 flex items-center gap-4 [writing-mode:vertical-rl] rotate-180">
+          <span className="text-[0.6rem] tracking-[0.5em] uppercase">Sec.01 — Forge</span>
+          <span className="text-base tracking-[0.4em] text-gold/20">鍛 鍛 鍛</span>
+        </div>
+        {/* right edge — live scroll-progress rail + numeric readout */}
+        <div className="absolute right-[1.7vw] top-1/2 -translate-y-1/2 flex flex-col items-center gap-3">
+          <span className="text-[0.55rem] tracking-[0.4em] uppercase [writing-mode:vertical-rl]">Scroll</span>
+          <span className="relative block w-px h-28 bg-washi/12 overflow-hidden">
+            <span ref={progressFillRef} className="absolute inset-x-0 top-0 bg-gold/45" style={{ height: '0%' }} />
+          </span>
+          <span className="text-[0.58rem] tracking-[0.15em] tabular-nums">
+            <span ref={pctRef}>000</span>%
+          </span>
+        </div>
+      </div>
+
+      {/* Sticky top bar — ONE element: monogram (LEFT) + nav (RIGHT). Fixed at the top
+          across the ENTIRE scroll (hero → about → every section), like StringTune. The
+          wordmark + tagline are NOT here — they live in the hero and scroll away. */}
+      <header className="fixed top-0 inset-x-0 z-50 pointer-events-none">
+        <div className="bg-linear-to-b from-ink/70 via-ink/25 to-transparent">
+          <div className="flex items-center justify-between px-6 md:px-10 h-16 md:h-20">
+            <span className="text-2xl leading-none text-gold pointer-events-auto select-none">鍛</span>
+            <nav className="flex gap-1.5 pointer-events-auto">
+              <span className={`${PILL} border-gold/50 text-gold`}>About</span>
+              <span className={`${PILL} border-washi/15 text-washi/70`}>Projects</span>
+              <span className={`${PILL} border-washi/15 text-washi/70`}>CP</span>
+              <span className={`${PILL} border-washi/15 text-washi/70`}>Contact</span>
+            </nav>
+          </div>
+        </div>
+      </header>
 
       {/* Loading state (DOM overlay, fades out when the model is ready). */}
       <Loader
