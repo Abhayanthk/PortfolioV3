@@ -82,7 +82,12 @@ const KDISS = { in: 0.945, out: 0.972 } // PHASE 2: katana pixel-dissolve (blade
 const KBLOCK_PX = 48 // uniform CHUNKY dissolve block size (device px)
 const LABEL_IN = { in: 0.975, out: 0.987 } // PHASE 3: "projects" label clean blur-to-sharp
 const LAND_VANISH = { in: 0.99, out: 1.0 } // PHASE 4: one-color glitch-out — label + landscape vanish
-const ROWS_IN = { in: 0.992, out: 1.0 } // PHASE 5: plain dark rows section revealed
+// PHASE 5: the LIGHT projects section. A cream BACKDROP (z-1) fades in EARLY — hidden behind
+// the still-opaque landscape — so the glitch-out's vanishing blocks reveal cream, never the
+// dark body. The interactive CONTENT (z-40, above the canvas so its buttons are clickable)
+// resolves with the dissolve.
+const PAPER_IN = { in: 0.95, out: 0.985 } // cream reveal target, ready before the vanish
+const ROWS_IN = { in: 0.99, out: 1.0 } // projects content resolves as the landscape vanishes
 const LAND_BLOCKS = 24 // landscape glitch block count (vertical)
 const LAND_OUT_COLOR = '#f4f1ea' // glitch-out tone = LIGHT projects paper (reference redesign)
 const PAN_STRENGTH = 0.95 // how far the mouse pans into the cropped image margin (1 = full)
@@ -971,13 +976,18 @@ const LAND_FRAG = /* glsl */ `
       col = mix(col, lab.rgb, lab.a * li);
     }
 
-    // PHASE 4 glitch-OUT: each block flips to ONE bg color, then is removed → rows.
-    float toBg = step(lHash(cellId + 5.0), smoothstep(0.0, 0.85, uVanish));
+    // PHASE 4 glitch-OUT: each block flips to ONE bg color, then is removed → section.
+    // vanishGate floors out the cells whose hash is ~0: without it those few cells satisfy
+    // step(hash, 0) === 1 while the landscape is still clean, leaving stray frozen blocks
+    // (a cream toBg square + a black gone-hole) parked on screen. Only let toBg/gone act
+    // once the glitch-out is genuinely underway.
+    float vanishGate = step(0.0008, uVanish);
+    float toBg = step(lHash(cellId + 5.0), smoothstep(0.0, 0.85, uVanish)) * vanishGate;
     col = mix(col, uOutColor, toBg);
 
     // Per-block alpha: appears (in) blockwise, vanishes (out) blockwise.
     float appear = step(lHash(cellId + 3.0), smoothstep(0.0, 0.55, uReveal));
-    float gone = step(lHash(cellId + 9.0), uVanish);
+    float gone = step(lHash(cellId + 9.0), uVanish) * vanishGate;
     // Hard gate: the layer is FULLY hidden until the glitch-in actually starts, so no
     // stray hash==0 blocks leak the image over the hero / about sections.
     // (NB: do not name this var "active" — that is a reserved word in GLSL.)
@@ -987,21 +997,37 @@ const LAND_FRAG = /* glsl */ `
   }
 `
 
-// Draw the "projects" wordmark to a canvas → texture, so it dissolves in the same
+// Draw the "projects" intro wordmark to a canvas → texture, so it dissolves in the same
 // pass as the landscape. Tight 4:1 canvas keeps the on-screen aspect correction simple.
-const LABEL_CANVAS_ASPECT = 1024 / 256
-function makeLabelTexture(text: string) {
-  const c = document.createElement('canvas')
-  c.width = 1024
-  c.height = 256
+// It reads over the BUSY dark landscape, so it is large, washi-white, and carries a soft
+// baked dark halo (scrim) for legibility — and uses the SAME face as the light section's
+// "Projects" header (Bricolage Grotesque). The face is web-loaded, so callers redraw once
+// document.fonts is ready (see LandscapeQuad); a system fallback is used until then.
+const LABEL_CANVAS_ASPECT = 2048 / 512
+const LABEL_FONT = "700 320px 'Bricolage Grotesque', system-ui, -apple-system, sans-serif"
+function drawLabel(c: HTMLCanvasElement, text: string) {
   const ctx = c.getContext('2d')!
   ctx.clearRect(0, 0, c.width, c.height)
-  ctx.fillStyle = '#1c1a16' // sumi — resolves as dark text, matching the LIGHT projects hand-off
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.font = '600 150px Archivo, system-ui, -apple-system, sans-serif'
-  ;(ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = '14px'
-  ctx.fillText(text, c.width / 2, c.height / 2 + 6)
+  ctx.font = LABEL_FONT
+  ;(ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = '6px'
+  const x = c.width / 2
+  const y = c.height / 2 + 8
+  ctx.fillStyle = '#ECE8E1' // washi — light text against the dark mountains
+  // soft dark scrim/glow baked into the texture so the word holds over the busy image
+  ctx.shadowColor = 'rgba(0,0,0,0.7)'
+  ctx.shadowBlur = 44
+  ctx.fillText(text, x, y)
+  ctx.fillText(text, x, y) // second pass deepens the halo
+  ctx.shadowBlur = 0
+  ctx.fillText(text, x, y) // crisp light text on top
+}
+function makeLabelTexture(text: string) {
+  const c = document.createElement('canvas')
+  c.width = 2048
+  c.height = 512
+  drawLabel(c, text)
   const t = new THREE.CanvasTexture(c)
   t.colorSpace = THREE.NoColorSpace // raw passthrough — matches the landscape layer
   t.needsUpdate = true
@@ -1024,6 +1050,18 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
 
   const labelTex = useMemo(() => makeLabelTexture('projects'), [])
 
+  // The label face (Bricolage Grotesque) is web-loaded; redraw the texture once it's ready
+  // so the intro wordmark matches the light section's "Projects" header exactly.
+  useEffect(() => {
+    let alive = true
+    const redraw = () => {
+      if (!alive) return
+      drawLabel(labelTex.image as HTMLCanvasElement, 'projects')
+      labelTex.needsUpdate = true
+    }
+    document.fonts.load("700 320px 'Bricolage Grotesque'").then(redraw, redraw)
+  }, [labelTex])
+
   const uniforms = useMemo(
     () => ({
       uTex: { value: tex },
@@ -1031,7 +1069,7 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
       uRes: { value: new THREE.Vector2(1, 1) },
       uImgAspect: { value: LAND_IMG_ASPECT },
       uLabelAspect: { value: LABEL_CANVAS_ASPECT },
-      uLabelH: { value: 0.07 },
+      uLabelH: { value: 0.18 }, // large, prominent centered intro label
       uReveal: { value: 0 },
       uLabelIn: { value: 0 },
       uVanish: { value: 0 },
@@ -1275,13 +1313,13 @@ const STRIPE_FILL: React.CSSProperties = {
  * site's weighted easing without a JS height measure. */
 function ProjectRow({ project, active, onOpen }: { project: Project; active: boolean; onOpen: () => void }) {
   return (
-    <div className="border-b border-sumi/10">
+    <div className="border-b border-sumi/12 first:border-t first:border-sumi/12">
       {/* header row — always visible, the only scroll-blocking hit target is the button */}
       <button
         type="button"
         onClick={onOpen}
         aria-expanded={active}
-        className="pointer-events-auto flex w-full items-center gap-5 py-[2.1vh] text-left"
+        className="pointer-events-auto flex w-full items-center gap-5 py-[2.5vh] text-left"
       >
         <span
           className={`w-8 shrink-0 font-mono text-[0.82rem] font-semibold tabular-nums transition-colors duration-500 ${active ? 'text-workgold' : 'text-[#9a9488]'}`}
@@ -1312,14 +1350,14 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
         style={{ gridTemplateRows: active ? '1fr' : '0fr', transitionTimingFunction: ACC_EASE }}
       >
         <div className="min-h-0 overflow-hidden">
-          <div className="grid grid-cols-1 gap-8 pb-[3.2vh] pt-1 md:grid-cols-[1fr_1.15fr] md:gap-11">
+          <div className="grid grid-cols-1 gap-7 pb-[2.4vh] pt-0.5 md:grid-cols-[1fr_1.15fr] md:gap-10">
             {/* left — description · stack chips · key features · live demo */}
             <div className="flex flex-col">
-              <p className="max-w-[460px] text-[clamp(0.95rem,1.15vw,1.06rem)] leading-[1.6] text-[#48443c]">
+              <p className="max-w-[460px] text-[clamp(0.9rem,1.1vw,1.02rem)] leading-[1.55] text-[#48443c]">
                 {project.description}
               </p>
 
-              <div className="mt-5 flex flex-wrap gap-2">
+              <div className="mt-4 flex flex-wrap gap-2">
                 {project.stack.map((t) => (
                   <span
                     key={t}
@@ -1330,13 +1368,13 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
                 ))}
               </div>
 
-              <div className="mt-5 border-t border-sumi/10 pt-4">
-                <div className="mb-2.5 font-mono text-[0.6rem] font-medium tracking-[0.22em] text-workgold">
+              <div className="mt-4 border-t border-sumi/12 pt-3.5">
+                <div className="mb-2 font-mono text-[0.6rem] font-medium tracking-[0.22em] text-workgold">
                   KEY FEATURES
                 </div>
-                <ul className="grid gap-x-8 gap-y-1.5 sm:grid-cols-2">
+                <ul className="grid gap-x-8 gap-y-1 sm:grid-cols-2">
                   {project.features.map((f) => (
-                    <li key={f} className="flex gap-2 text-[0.8rem] leading-[1.5] text-[#5a564c]">
+                    <li key={f} className="flex gap-2 text-[0.78rem] leading-[1.45] text-[#5a564c]">
                       <span className="shrink-0 text-workgold/70">›</span>
                       <span>{f}</span>
                     </li>
@@ -1346,7 +1384,7 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
 
               <a
                 href={project.href}
-                className="pointer-events-auto mt-6 inline-flex w-fit items-center gap-2 rounded-full bg-sumi px-5 py-3 font-hanken text-[0.85rem] font-semibold text-paper transition-transform hover:-translate-y-0.5"
+                className="pointer-events-auto mt-5 inline-flex w-fit items-center gap-2 rounded-full bg-sumi px-5 py-2.5 font-hanken text-[0.82rem] font-semibold text-paper transition-transform hover:-translate-y-0.5"
               >
                 Live demo <span aria-hidden>→</span>
               </a>
@@ -1354,7 +1392,7 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
 
             {/* right — VIDEO placeholder (reference styling). The <video> slot is ready: drop a
                 looping muted clip in `src` and remove the striped/overlay placeholder below. */}
-            <div className="relative aspect-[4/3] overflow-hidden rounded-[14px] bg-[#e7e2d6] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.06)] md:aspect-auto md:h-[42vh]">
+            <div className="relative aspect-[4/3] overflow-hidden rounded-[14px] bg-[#e7e2d6] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.06)] md:aspect-auto md:h-[33vh]">
               <video className="absolute inset-0 h-full w-full object-cover" autoPlay muted loop playsInline />
               <div className="absolute inset-0" style={STRIPE_FILL} />
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3.5">
@@ -1373,51 +1411,64 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
   )
 }
 
-/* The LIGHT projects section (reference redesign). Fixed full-viewport cream panel revealed
- * as the landscape glitches out. The container stays pointer-events-none so the wheel keeps
- * driving the katana scroll; only the row buttons + live-demo links opt back in. `rowsRef`
- * (section opacity) and `headerRef` (blur-to-sharp focus pull) are driven by the App tick. */
+/* The LIGHT projects section (reference redesign). Rendered as TWO fixed layers:
+ *   • paperRef — a cream BACKDROP at z-1. It fades in early (PAPER_IN), hidden behind the
+ *     still-opaque landscape, so the glitch-out's vanishing blocks reveal cream, not the
+ *     dark body. This is what the dissolve resolves into.
+ *   • rowsRef — the interactive CONTENT at z-40, ABOVE the 3D canvas so its row buttons +
+ *     live-demo links actually receive clicks (the canvas/ScrollControls scroller otherwise
+ *     swallows them). It stays pointer-events-none so the wheel still drives the katana
+ *     scroll; only the buttons/links opt back in. `headerRef` gets the blur-to-sharp focus
+ *     pull. Both layers' opacity is driven by the App tick. */
 function ProjectsSection({
+  paperRef,
   rowsRef,
   headerRef,
 }: {
+  paperRef: React.RefObject<HTMLDivElement>
   rowsRef: React.RefObject<HTMLDivElement>
   headerRef: React.RefObject<HTMLDivElement>
 }) {
   const [active, setActive] = useState(0) // exactly one open; project 01 starts expanded
 
   return (
-    <div
-      ref={rowsRef}
-      style={{ opacity: 0 }}
-      className="fixed inset-0 z-[1] flex flex-col overflow-hidden bg-paper px-[7vw] pb-[4vh] pt-[5vh] font-hanken text-sumi pointer-events-none"
-    >
-      {/* heading — eyebrow · Projects · right-aligned index blurb (sharpens in via headerRef) */}
-      <div
-        ref={headerRef}
-        style={{ opacity: 0 }}
-        className="flex shrink-0 flex-wrap items-end justify-between gap-6 border-t border-sumi/10 pt-6"
-      >
-        <div>
-          <div className="mb-3 font-mono text-[0.72rem] font-semibold tracking-[0.22em] text-workgold">
-            鍛 — SELECTED WORK / 2025
-          </div>
-          <h2 className="font-grotesk text-[clamp(2.6rem,7vw,5rem)] font-semibold leading-[0.92] tracking-[-0.03em]">
-            Projects
-          </h2>
-        </div>
-        <p className="max-w-[300px] pb-2 text-right text-[0.92rem] leading-[1.6] text-[#6f6a5f]">
-          A short index of things I've designed, shipped, and forged — mostly AI systems built end-to-end.
-        </p>
-      </div>
+    <>
+      {/* cream reveal target — the dissolve resolves into this */}
+      <div ref={paperRef} style={{ opacity: 0 }} className="fixed inset-0 z-[1] bg-paper pointer-events-none" />
 
-      {/* accordion list — 01→04, exactly one expanded */}
-      <div className="mt-[3vh] flex min-h-0 flex-1 flex-col border-t border-sumi/10">
-        {PROJECTS.map((project, i) => (
-          <ProjectRow key={project.num} project={project} active={i === active} onOpen={() => setActive(i)} />
-        ))}
+      {/* interactive content — above the canvas so clicks land */}
+      <div
+        ref={rowsRef}
+        style={{ opacity: 0 }}
+        className="fixed inset-0 z-40 flex flex-col overflow-hidden px-[7vw] pb-[3vh] pt-20 md:pt-24 font-hanken text-sumi pointer-events-none"
+      >
+        {/* heading — eyebrow · Projects · right-aligned index blurb (sharpens in via headerRef) */}
+        <div
+          ref={headerRef}
+          style={{ opacity: 0 }}
+          className="flex shrink-0 flex-wrap items-end justify-between gap-6 border-t border-sumi/12 pt-5"
+        >
+          <div>
+            <div className="mb-2.5 font-mono text-[0.72rem] font-semibold tracking-[0.22em] text-workgold">
+              鍛 — SELECTED WORK / 2025
+            </div>
+            <h2 className="font-grotesk text-[clamp(2.4rem,6vw,4.4rem)] font-semibold leading-[0.92] tracking-[-0.03em]">
+              Projects
+            </h2>
+          </div>
+          <p className="max-w-[300px] pb-2 text-right text-[0.92rem] leading-[1.6] text-[#6f6a5f]">
+            A short index of things I've designed, shipped, and forged — mostly AI systems built end-to-end.
+          </p>
+        </div>
+
+        {/* accordion list — 01→04, exactly one expanded */}
+        <div className="mt-[2vh] flex min-h-0 flex-1 flex-col">
+          {PROJECTS.map((project, i) => (
+            <ProjectRow key={project.num} project={project} active={i === active} onOpen={() => setActive(i)} />
+          ))}
+        </div>
       </div>
-    </div>
+    </>
   )
 }
 
@@ -1464,7 +1515,8 @@ export default function App() {
 
   // STAGE 2 transition + projects refs.
   const aboutLayerRef = useRef<HTMLDivElement>(null) // about overlay, faded out as the zone begins
-  const rowsRef = useRef<HTMLDivElement>(null) // LIGHT projects section, revealed as the landscape dissolves
+  const paperRef = useRef<HTMLDivElement>(null) // cream backdrop (z-1) — the dissolve's reveal target
+  const rowsRef = useRef<HTMLDivElement>(null) // LIGHT projects content (z-40), revealed as the landscape dissolves
   const projectsHeaderRef = useRef<HTMLDivElement>(null) // section heading — shared blur-to-sharp focus pull
   // Top bar crossfade: a dark copy (hero/about) and a light copy (over the cream projects)
   // stacked, opacity-swapped as the section lands so the bar stays legible on either theme.
@@ -1509,7 +1561,16 @@ export default function App() {
       // revealed (fades in BEHIND the landscape) as the landscape pixel-dissolves away.
       if (aboutLayerRef.current)
         aboutLayerRef.current.style.opacity = `${1 - smoothstep(ABOUT_CLEAR.in, ABOUT_CLEAR.out, p)}`
-      if (rowsRef.current) rowsRef.current.style.opacity = `${smoothstep(ROWS_IN.in, ROWS_IN.out, p)}`
+      // Cream backdrop fills in early (hidden behind the opaque landscape) so the glitch-out
+      // reveals cream; the interactive content resolves with the dissolve.
+      if (paperRef.current) paperRef.current.style.opacity = `${smoothstep(PAPER_IN.in, PAPER_IN.out, p)}`
+      if (rowsRef.current) {
+        rowsRef.current.style.opacity = `${smoothstep(ROWS_IN.in, ROWS_IN.out, p)}`
+        // Gate interactivity: visibility:hidden also blocks the z-40 buttons from swallowing
+        // wheel/clicks over the hero/about (where the section is invisible), so the katana
+        // scroll stays intact until the projects section has actually landed.
+        rowsRef.current.style.visibility = p > 0.985 ? 'visible' : 'hidden'
+      }
 
       // Section heading sharpens in with the section (same blur-to-sharp focus pull as About).
       driveFocus(projectsHeaderRef.current, smoothstep(ROWS_IN.in, ROWS_IN.out, p))
@@ -1540,7 +1601,7 @@ export default function App() {
           as it pixel-dissolves to cream. Click-accordion; z-1 so the dissolve reveals it
           cleanly; pointer-events-none so the wheel still drives the katana scroll (only the
           row buttons + live-demo links opt back in). */}
-      <ProjectsSection rowsRef={rowsRef} headerRef={projectsHeaderRef} />
+      <ProjectsSection paperRef={paperRef} rowsRef={rowsRef} headerRef={projectsHeaderRef} />
 
       {/* Layer 2 — CLEAN, vibrant PROJECTS landscape (own canvas). Transparent until
           the zone; fades in behind the dissolving sword, then pixel-dissolves itself. */}
