@@ -6,9 +6,15 @@
   --color-ink: #0a0a0a;
   --color-washi: #ece8e1;
   --color-gold: #c8a24a;
+  /* Light PROJECTS theme (reference redesign) */
+  --color-paper: #f4f1ea;
+  --color-sumi: #1c1a16;
+  --color-workgold: #c89b3c;
   --font-display: 'Archivo', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
   --font-dramatic: 'Cormorant Garamond', 'Georgia', serif;
+  --font-grotesk: 'Bricolage Grotesque', system-ui, sans-serif;
+  --font-hanken: 'Hanken Grotesk', system-ui, -apple-system, sans-serif;
 }
 
 @layer base {

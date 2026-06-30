@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Environment, Loader, ScrollControls, useAnimations, useGLTF, useScroll, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
@@ -69,8 +69,9 @@ const SETTLE_END = 0.87 // full parallel = last About beat lands
  *   Timed TOGETHER with the landscape glitch-IN so both finish at the SAME moment.
  * PHASE 2  the sheathed katana PIXELS OUT (chunky localized dissolve) → clean landscape.
  * PHASE 3  small "projects" label resolves with a clean blur-to-sharp.
- * PHASE 4  glitch-OUT: blocks of ONE bg color (#0A0A0A) vanish into the rows section.
- * PHASE 5  plain dark (#0A0A0A) rows section — empty placeholders, no katana/landscape.
+ * PHASE 4  glitch-OUT: blocks of ONE bg color (#f4f1ea — the LIGHT projects paper)
+ *          vanish into the projects section, so the hand-off lands on cream, not dark.
+ * PHASE 5  light (#f4f1ea) PROJECTS section — reference redesign, click-accordion.
  */
 const RESHEATHE_OFFSET = { in: 0.87, out: 0.905 } // STEP 1: reverse parallel offset → clip END pose
 const RESHEATHE_CLIP = { in: 0.905, out: 0.935 } // STEP 2: reverse-scrub clip → blade slides INTO scabbard
@@ -83,7 +84,7 @@ const LABEL_IN = { in: 0.975, out: 0.987 } // PHASE 3: "projects" label clean bl
 const LAND_VANISH = { in: 0.99, out: 1.0 } // PHASE 4: one-color glitch-out — label + landscape vanish
 const ROWS_IN = { in: 0.992, out: 1.0 } // PHASE 5: plain dark rows section revealed
 const LAND_BLOCKS = 24 // landscape glitch block count (vertical)
-const LAND_OUT_COLOR = '#0a0a0a' // glitch-out tone = projects section bg
+const LAND_OUT_COLOR = '#f4f1ea' // glitch-out tone = LIGHT projects paper (reference redesign)
 const PAN_STRENGTH = 0.95 // how far the mouse pans into the cropped image margin (1 = full)
 const PETAL_FADE = { in: 0.87, out: 0.91 } // petals clear as the katana re-sheathes
 const ABOUT_CLEAR = { in: 0.855, out: 0.885 } // about beats clear as the zone begins
@@ -166,6 +167,21 @@ const remapScroll = (raw: number) =>
   raw <= SCROLL_SPLIT
     ? (raw / SCROLL_SPLIT) * SETTLE_END
     : SETTLE_END + ((raw - SCROLL_SPLIT) / (1 - SCROLL_SPLIT)) * (1 - SETTLE_END)
+
+/* ---- PAGE / SCROLL BUDGET --------------------------------------------------
+ * The katana arc (hero → about → about→projects transition) keeps its EXACT physical
+ * scroll; the PROJECTS scroll-stack is APPENDED as extra pages. `KATANA_SCROLL` is the
+ * fraction of the raw page-scroll the katana arc owns — feed `raw / KATANA_SCROLL` into
+ * remapScroll so the existing choreography stays pixel-identical, and drive the stack
+ * off the remaining raw 1 − KATANA_SCROLL. */
+const HERO_PAGES = 8 // hero + about + transition (unchanged feel)
+// Projects is now a CLICK-driven accordion (not a scroll-stack), so it needs no scroll
+// budget of its own — 1 page leaves a small post-landing buffer. NB: the katana arc keeps
+// EXACTLY (HERO_PAGES-1) pages of physical scroll regardless of this value, so the
+// hero/about/transition feel is pixel-identical.
+const STACK_PAGES = 1 // tiny tail after the section lands (was a 5-page sticky stack)
+const TOTAL_PAGES = HERO_PAGES + STACK_PAGES
+const KATANA_SCROLL = (HERO_PAGES - 1) / (TOTAL_PAGES - 1)
 
 const damp = THREE.MathUtils.damp
 
@@ -825,26 +841,40 @@ function PetalField({ progressRef }: { progressRef: React.MutableRefObject<numbe
 type DriveProps = {
   axesRef: React.MutableRefObject<Axes | null>
   progressRef: React.MutableRefObject<number>
+  stackProgressRef?: React.MutableRefObject<number> // only Scene/Progress use it
 }
 
 // Runs FIRST each frame: damps the one shared progress `p` toward the RAW scroll
 // (read straight off the DOM container, bypassing ScrollControls' own smoothing).
 // Everything else reads progressRef.current, so all parts share a single timeline.
-function Progress({ progressRef }: { progressRef: React.MutableRefObject<number> }) {
+function Progress({
+  progressRef,
+  stackProgressRef,
+}: {
+  progressRef: React.MutableRefObject<number>
+  stackProgressRef: React.MutableRefObject<number>
+}) {
   const data = useScroll()
   useFrame((_, dt) => {
     const el = data.el
     const raw = el ? el.scrollTop / (el.scrollHeight - el.clientHeight || 1) : 0
-    progressRef.current = damp(progressRef.current, clamp01(remapScroll(raw)), PROGRESS_DAMP, dt)
+    // Katana arc owns raw 0 → KATANA_SCROLL (its physical scroll is unchanged); rescale so
+    // remapScroll sees a full 0 → 1 across just that span.
+    const katana = clamp01(remapScroll(clamp01(raw / KATANA_SCROLL)))
+    progressRef.current = damp(progressRef.current, katana, PROGRESS_DAMP, dt)
+    // The projects stack owns the remaining raw KATANA_SCROLL → 1.
+    const stack = clamp01((raw - KATANA_SCROLL) / (1 - KATANA_SCROLL))
+    stackProgressRef.current = damp(stackProgressRef.current, stack, PROGRESS_DAMP, dt)
   })
   return null
 }
 
-function Scene({ axesRef, progressRef }: DriveProps) {
+function Scene({ axesRef, progressRef, stackProgressRef }: DriveProps) {
   return (
     <>
-      {/* Single smoothed progress — updated before Katana & Rig read it. */}
-      <Progress progressRef={progressRef} />
+      {/* Two smoothed progress values (katana arc + projects stack) — updated before
+          Katana & Rig read them. */}
+      <Progress progressRef={progressRef} stackProgressRef={stackProgressRef!} />
 
       {/* Key light: hard, raking, defines the blade's edge. */}
       <directionalLight position={[4, 6, 5]} intensity={2.4} color="#fff6ea" />
@@ -966,7 +996,7 @@ function makeLabelTexture(text: string) {
   c.height = 256
   const ctx = c.getContext('2d')!
   ctx.clearRect(0, 0, c.width, c.height)
-  ctx.fillStyle = '#ece8e1' // washi
+  ctx.fillStyle = '#1c1a16' // sumi — resolves as dark text, matching the LIGHT projects hand-off
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.font = '600 150px Archivo, system-ui, -apple-system, sans-serif'
@@ -1150,17 +1180,275 @@ const ZONE_ALIGN: Record<string, string> = {
   RIGHT: 'items-end text-right',
 }
 
-/* ---- PROJECTS skeleton (STAGE 2, placeholders — no real content yet) ------- */
-const PROJECTS = [
-  { id: 1, label: 'Project 1' },
-  { id: 2, label: 'Project 2' },
-  { id: 3, label: 'Project 3' },
-  { id: 4, label: 'Project 4' },
-] as const
+/* ---- PROJECTS (STAGE 2 — LIGHT click-accordion, reference redesign) ----------
+ * A cream (#f4f1ea) section in the reference's minimal style. The list holds all four
+ * projects in 01→04 order; exactly ONE is expanded at a time (an in-place accordion):
+ * the open row shows the full card (description · stack · key features · media · live
+ * demo), the rest stay as compact rows (number · name · tagline · View →). Clicking a
+ * collapsed row opens it and the previously-open one folds back. Height animates with the
+ * grid-template-rows 0fr↔1fr trick on the site's weighted easing. The whole section is
+ * pointer-events-none so the wheel still drives the katana scroll; only the row buttons +
+ * live-demo links opt back in. Driven by React state, not scroll. */
+type Project = {
+  num: string
+  name: string
+  tagline: string // one-line summary shown in the collapsed row
+  description: string
+  stack: string[]
+  features: string[]
+  href: string
+}
+
+const PROJECTS: Project[] = [
+  {
+    num: '01',
+    name: 'Retain AI',
+    tagline: 'Multi-agent churn-retention engine',
+    description:
+      'A multi-agent retention engine that predicts churn and orchestrates win-back campaigns — an 18-node LangGraph pipeline running at zero inference cost.',
+    stack: ['Python', 'LangGraph', 'ChromaDB', 'FastAPI', 'Gemini Flash', 'Groq'],
+    features: [
+      '18-node LangGraph multi-agent pipeline: churn prediction → intervention orchestration',
+      'Cox proportional-hazards survival analysis for churn-risk modeling',
+      'Monte Carlo simulation for campaign-outcome forecasting',
+      'Signal-aware RAG over ChromaDB',
+      '$0 inference cost via intelligent Gemini Flash / Groq routing',
+    ],
+    href: '#',
+  },
+  {
+    num: '02',
+    name: 'Nextflow',
+    tagline: 'Visual node-based AI workflow builder',
+    description:
+      'A visual, node-based AI workflow builder with a custom DAG execution engine — wire nodes together and run distributed, durable workflows.',
+    stack: ['Next.js', 'TypeScript', 'React Flow', 'Trigger.dev', 'PostgreSQL', 'Redis'],
+    features: [
+      'Custom DAG execution engine with topological scheduling (BFS/DFS)',
+      'Visual node editor built on React Flow',
+      'Distributed, durable execution on Trigger.dev',
+      'Partial re-execution caching — only re-runs changed nodes',
+      'Distributed state management across the graph',
+    ],
+    href: '#',
+  },
+  {
+    num: '03',
+    name: 'Orbyt',
+    tagline: 'OpenAI-compatible multi-provider LLM gateway',
+    description:
+      'An OpenAI-compatible LLM gateway that unifies multiple providers behind one API, with Redis-backed key orchestration and a pluggable adapter layer.',
+    stack: ['TypeScript', 'Node.js', 'Redis', 'PostgreSQL'],
+    features: [
+      'OpenAI-compatible API surface — drop-in replacement',
+      'Redis-backed API-key orchestration & rotation',
+      'Provider adapter layer built on the open/closed principle (add providers without touching core)',
+      'Unified multi-provider routing',
+    ],
+    href: '#',
+  },
+  {
+    num: '04',
+    name: 'Achron',
+    tagline: 'Productivity platform — coming soon',
+    description: '[PLACEHOLDER — productivity platform; user will provide]',
+    stack: ['[PLACEHOLDER]'],
+    features: ['[PLACEHOLDER — user will provide]'],
+    href: '#',
+  },
+]
+
+// Weighted expand/collapse easing — the same "heavy settle" used across the katana arc.
+const ACC_EASE = 'cubic-bezier(0.16, 1, 0.3, 1)'
+
+// The reference's media placeholder: a 135° hatched fill (utilities can't express the
+// repeating-linear-gradient cleanly, so it's an inline style object per house rules).
+const STRIPE_FILL: React.CSSProperties = {
+  backgroundImage:
+    'repeating-linear-gradient(135deg, transparent, transparent 9px, #c4bca8 9px, #c4bca8 10px)',
+  opacity: 0.5,
+}
+
+/* One accordion item. The header row (number · name · tagline · View) is always present
+ * and clickable; the expanded body (description · stack · key features · media · live demo)
+ * is height-animated via the grid-template-rows 0fr↔1fr trick so it expands/collapses on the
+ * site's weighted easing without a JS height measure. */
+function ProjectRow({ project, active, onOpen }: { project: Project; active: boolean; onOpen: () => void }) {
+  return (
+    <div className="border-b border-sumi/10">
+      {/* header row — always visible, the only scroll-blocking hit target is the button */}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-expanded={active}
+        className="pointer-events-auto flex w-full items-center gap-5 py-[2.1vh] text-left"
+      >
+        <span
+          className={`w-8 shrink-0 font-mono text-[0.82rem] font-semibold tabular-nums transition-colors duration-500 ${active ? 'text-workgold' : 'text-[#9a9488]'}`}
+        >
+          {project.num}
+        </span>
+        <h3
+          className="shrink-0 font-grotesk font-semibold leading-none tracking-[-0.02em] text-sumi transition-[font-size] duration-500"
+          style={{ fontSize: active ? 'clamp(2rem,4.4vw,3.25rem)' : '1.6rem', transitionTimingFunction: ACC_EASE }}
+        >
+          {project.name}
+        </h3>
+        <span
+          className={`flex-1 truncate text-[0.92rem] text-[#8a8478] transition-opacity duration-300 ${active ? 'opacity-0' : 'opacity-100'}`}
+        >
+          {project.tagline}
+        </span>
+        <span
+          className={`shrink-0 font-mono text-[0.78rem] font-semibold text-workgold transition-opacity duration-300 ${active ? 'opacity-0' : 'opacity-100'}`}
+        >
+          View →
+        </span>
+      </button>
+
+      {/* expanded body — grid-rows trick: 0fr (collapsed) ↔ 1fr (open), always mounted */}
+      <div
+        className="grid transition-[grid-template-rows] duration-700"
+        style={{ gridTemplateRows: active ? '1fr' : '0fr', transitionTimingFunction: ACC_EASE }}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="grid grid-cols-1 gap-8 pb-[3.2vh] pt-1 md:grid-cols-[1fr_1.15fr] md:gap-11">
+            {/* left — description · stack chips · key features · live demo */}
+            <div className="flex flex-col">
+              <p className="max-w-[460px] text-[clamp(0.95rem,1.15vw,1.06rem)] leading-[1.6] text-[#48443c]">
+                {project.description}
+              </p>
+
+              <div className="mt-5 flex flex-wrap gap-2">
+                {project.stack.map((t) => (
+                  <span
+                    key={t}
+                    className="rounded-full bg-sumi/5 px-3 py-1.5 font-hanken text-[0.72rem] font-medium text-[#5a564c]"
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+
+              <div className="mt-5 border-t border-sumi/10 pt-4">
+                <div className="mb-2.5 font-mono text-[0.6rem] font-medium tracking-[0.22em] text-workgold">
+                  KEY FEATURES
+                </div>
+                <ul className="grid gap-x-8 gap-y-1.5 sm:grid-cols-2">
+                  {project.features.map((f) => (
+                    <li key={f} className="flex gap-2 text-[0.8rem] leading-[1.5] text-[#5a564c]">
+                      <span className="shrink-0 text-workgold/70">›</span>
+                      <span>{f}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <a
+                href={project.href}
+                className="pointer-events-auto mt-6 inline-flex w-fit items-center gap-2 rounded-full bg-sumi px-5 py-3 font-hanken text-[0.85rem] font-semibold text-paper transition-transform hover:-translate-y-0.5"
+              >
+                Live demo <span aria-hidden>→</span>
+              </a>
+            </div>
+
+            {/* right — VIDEO placeholder (reference styling). The <video> slot is ready: drop a
+                looping muted clip in `src` and remove the striped/overlay placeholder below. */}
+            <div className="relative aspect-[4/3] overflow-hidden rounded-[14px] bg-[#e7e2d6] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.06)] md:aspect-auto md:h-[42vh]">
+              <video className="absolute inset-0 h-full w-full object-cover" autoPlay muted loop playsInline />
+              <div className="absolute inset-0" style={STRIPE_FILL} />
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3.5">
+                <span className="grid h-[62px] w-[62px] place-items-center rounded-full bg-sumi">
+                  <span className="ml-[3px] block h-0 w-0 border-y-[9px] border-l-[15px] border-y-transparent border-l-paper" />
+                </span>
+                <span className="rounded-md bg-paper/80 px-2.5 py-1 font-mono text-[0.62rem] tracking-[0.2em] text-[#8a8276]">
+                  {project.num} — DEMO REEL
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* The LIGHT projects section (reference redesign). Fixed full-viewport cream panel revealed
+ * as the landscape glitches out. The container stays pointer-events-none so the wheel keeps
+ * driving the katana scroll; only the row buttons + live-demo links opt back in. `rowsRef`
+ * (section opacity) and `headerRef` (blur-to-sharp focus pull) are driven by the App tick. */
+function ProjectsSection({
+  rowsRef,
+  headerRef,
+}: {
+  rowsRef: React.RefObject<HTMLDivElement>
+  headerRef: React.RefObject<HTMLDivElement>
+}) {
+  const [active, setActive] = useState(0) // exactly one open; project 01 starts expanded
+
+  return (
+    <div
+      ref={rowsRef}
+      style={{ opacity: 0 }}
+      className="fixed inset-0 z-[1] flex flex-col overflow-hidden bg-paper px-[7vw] pb-[4vh] pt-[5vh] font-hanken text-sumi pointer-events-none"
+    >
+      {/* heading — eyebrow · Projects · right-aligned index blurb (sharpens in via headerRef) */}
+      <div
+        ref={headerRef}
+        style={{ opacity: 0 }}
+        className="flex shrink-0 flex-wrap items-end justify-between gap-6 border-t border-sumi/10 pt-6"
+      >
+        <div>
+          <div className="mb-3 font-mono text-[0.72rem] font-semibold tracking-[0.22em] text-workgold">
+            鍛 — SELECTED WORK / 2025
+          </div>
+          <h2 className="font-grotesk text-[clamp(2.6rem,7vw,5rem)] font-semibold leading-[0.92] tracking-[-0.03em]">
+            Projects
+          </h2>
+        </div>
+        <p className="max-w-[300px] pb-2 text-right text-[0.92rem] leading-[1.6] text-[#6f6a5f]">
+          A short index of things I've designed, shipped, and forged — mostly AI systems built end-to-end.
+        </p>
+      </div>
+
+      {/* accordion list — 01→04, exactly one expanded */}
+      <div className="mt-[3vh] flex min-h-0 flex-1 flex-col border-t border-sumi/10">
+        {PROJECTS.map((project, i) => (
+          <ProjectRow key={project.num} project={project} active={i === active} onOpen={() => setActive(i)} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/* One copy of the sticky top bar in a given theme. Two are stacked + crossfaded so the bar
+ * reads on the dark hero/about AND the cream projects section. The active pill follows the
+ * theme: About highlights on dark, Projects highlights on light. */
+function TopBarInner({ tone }: { tone: 'dark' | 'light' }) {
+  const dark = tone === 'dark'
+  const grad = dark ? 'from-ink/70 via-ink/25' : 'from-paper/80 via-paper/30'
+  const mark = dark ? 'text-gold' : 'text-workgold'
+  const idle = dark ? 'border-washi/15 text-washi/70' : 'border-sumi/15 text-sumi/70'
+  const hot = dark ? 'border-gold/50 text-gold' : 'border-workgold/60 text-workgold'
+  return (
+    <div className={`bg-linear-to-b ${grad} to-transparent`}>
+      <div className="flex items-center justify-between px-6 md:px-10 h-16 md:h-20">
+        <span className={`text-2xl leading-none ${mark} pointer-events-auto select-none`}>鍛</span>
+        <nav className="flex gap-1.5 pointer-events-auto">
+          <span className={`${PILL} ${dark ? hot : idle}`}>About</span>
+          <span className={`${PILL} ${dark ? idle : hot}`}>Projects</span>
+          <span className={`${PILL} ${idle}`}>CP</span>
+          <span className={`${PILL} ${idle}`}>Contact</span>
+        </nav>
+      </div>
+    </div>
+  )
+}
 
 export default function App() {
   const axesRef = useRef<Axes | null>(null)
   const progressRef = useRef(0)
+  const stackProgressRef = useRef(0) // damped projects scroll-stack progress (q)
 
   const backdropRef = useRef<HTMLDivElement>(null) // sakura layer
   const nameLayerRef = useRef<HTMLDivElement>(null) // wordmark layer
@@ -1174,9 +1462,14 @@ export default function App() {
   const aboutRef = useRef<HTMLDivElement>(null)
   const beatRefs = useRef<(HTMLDivElement | null)[]>([])
 
-  // STAGE 2 transition refs.
+  // STAGE 2 transition + projects refs.
   const aboutLayerRef = useRef<HTMLDivElement>(null) // about overlay, faded out as the zone begins
-  const rowsRef = useRef<HTMLDivElement>(null) // dark rows section, revealed as the landscape dissolves
+  const rowsRef = useRef<HTMLDivElement>(null) // LIGHT projects section, revealed as the landscape dissolves
+  const projectsHeaderRef = useRef<HTMLDivElement>(null) // section heading — shared blur-to-sharp focus pull
+  // Top bar crossfade: a dark copy (hero/about) and a light copy (over the cream projects)
+  // stacked, opacity-swapped as the section lands so the bar stays legible on either theme.
+  const barDarkRef = useRef<HTMLDivElement>(null)
+  const barLightRef = useRef<HTMLDivElement>(null)
 
   // The ENTIRE hero overlay (tree + name + HUD) scrolls UP and out as ONE block,
   // tied to the shared progress so it matches the unsheathe pace. NOT fading in place.
@@ -1212,11 +1505,20 @@ export default function App() {
         driveFocus(beatRefs.current[i], plateau(p, b.a, b.b, b.c, b.d))
       }
 
-      // STAGE 2 — about beats clear as the zone begins; the plain dark rows section is
+      // STAGE 2 — about beats clear as the zone begins; the LIGHT projects section is
       // revealed (fades in BEHIND the landscape) as the landscape pixel-dissolves away.
       if (aboutLayerRef.current)
         aboutLayerRef.current.style.opacity = `${1 - smoothstep(ABOUT_CLEAR.in, ABOUT_CLEAR.out, p)}`
       if (rowsRef.current) rowsRef.current.style.opacity = `${smoothstep(ROWS_IN.in, ROWS_IN.out, p)}`
+
+      // Section heading sharpens in with the section (same blur-to-sharp focus pull as About).
+      driveFocus(projectsHeaderRef.current, smoothstep(ROWS_IN.in, ROWS_IN.out, p))
+
+      // STAGE 2 — top bar theme: crossfade dark → light over the glitch-out so the bar reads
+      // on cream once the projects section lands (synced with the label + section reveal).
+      const lit = smoothstep(LABEL_IN.in, ROWS_IN.out, p)
+      if (barDarkRef.current) barDarkRef.current.style.opacity = `${1 - lit}`
+      if (barLightRef.current) barLightRef.current.style.opacity = `${lit}`
 
       raf = requestAnimationFrame(tick)
     }
@@ -1234,40 +1536,11 @@ export default function App() {
         />
       </div>
 
-      {/* Layer 1 — PROJECTS rows: plain dark (#0A0A0A) section revealed BEHIND the
-          landscape as it pixel-dissolves. Empty placeholder rows for now. */}
-      <div
-        ref={rowsRef}
-        className="fixed inset-0 z-[1] bg-ink flex flex-col justify-center pointer-events-none text-washi"
-        style={{ opacity: 0 }}
-      >
-        <div className="px-6 md:px-12 mb-6 md:mb-9">
-          <span className="font-mono text-[0.62rem] tracking-[0.34em] uppercase text-gold/70">
-            鍛 — Selected Work
-          </span>
-          <h2 className="mt-2 font-display font-black tracking-[-0.03em] leading-none text-[clamp(2rem,6vw,4.5rem)]">
-            Projects
-          </h2>
-        </div>
-        {PROJECTS.map((proj) => (
-          <div
-            key={proj.id}
-            className="flex items-baseline justify-between gap-6 w-full border-t border-washi/12 last:border-b px-6 md:px-12 py-7 md:py-9"
-          >
-            <div className="flex items-baseline gap-5 md:gap-8">
-              <span className="font-mono text-[0.7rem] tracking-[0.25em] text-gold/80 tabular-nums">
-                0{proj.id}
-              </span>
-              <span className="font-display font-black uppercase tracking-[-0.02em] text-washi/85 text-[clamp(1.6rem,4.5vw,3.4rem)]">
-                {proj.label}
-              </span>
-            </div>
-            <span className="shrink-0 font-mono text-[0.62rem] tracking-[0.3em] uppercase text-washi/30">
-              Soon
-            </span>
-          </div>
-        ))}
-      </div>
+      {/* Layer 1 — LIGHT PROJECTS section (reference redesign), revealed BEHIND the landscape
+          as it pixel-dissolves to cream. Click-accordion; z-1 so the dissolve reveals it
+          cleanly; pointer-events-none so the wheel still drives the katana scroll (only the
+          row buttons + live-demo links opt back in). */}
+      <ProjectsSection rowsRef={rowsRef} headerRef={projectsHeaderRef} />
 
       {/* Layer 2 — CLEAN, vibrant PROJECTS landscape (own canvas). Transparent until
           the zone; fades in behind the dissolving sword, then pixel-dissolves itself. */}
@@ -1288,8 +1561,8 @@ export default function App() {
           camera={{ position: HERO_OFF.toArray(), fov: FOV, near: 0.1, far: 100 }}
         >
           <Suspense fallback={null}>
-            <ScrollControls pages={8}>
-              <Scene axesRef={axesRef} progressRef={progressRef} />
+            <ScrollControls pages={TOTAL_PAGES}>
+              <Scene axesRef={axesRef} progressRef={progressRef} stackProgressRef={stackProgressRef} />
             </ScrollControls>
           </Suspense>
         </Canvas>
@@ -1418,20 +1691,16 @@ export default function App() {
         </div>
       </div>
 
-      {/* Sticky top bar — ONE element: monogram (LEFT) + nav (RIGHT). Fixed at the top
-          across the ENTIRE scroll (hero → about → every section), like StringTune. The
-          wordmark + tagline are NOT here — they live in the hero and scroll away. */}
+      {/* Sticky top bar — monogram (LEFT) + nav (RIGHT). Fixed across the ENTIRE scroll
+          (hero → about → projects). Two stacked copies — a DARK one (default) and a LIGHT
+          one — crossfade as the cream projects section lands, so the bar stays legible on
+          either theme. The wordmark + tagline live in the hero and scroll away. */}
       <header className="fixed top-0 inset-x-0 z-50 pointer-events-none">
-        <div className="bg-linear-to-b from-ink/70 via-ink/25 to-transparent">
-          <div className="flex items-center justify-between px-6 md:px-10 h-16 md:h-20">
-            <span className="text-2xl leading-none text-gold pointer-events-auto select-none">鍛</span>
-            <nav className="flex gap-1.5 pointer-events-auto">
-              <span className={`${PILL} border-gold/50 text-gold`}>About</span>
-              <span className={`${PILL} border-washi/15 text-washi/70`}>Projects</span>
-              <span className={`${PILL} border-washi/15 text-washi/70`}>CP</span>
-              <span className={`${PILL} border-washi/15 text-washi/70`}>Contact</span>
-            </nav>
-          </div>
+        <div ref={barDarkRef} className="absolute inset-x-0 top-0">
+          <TopBarInner tone="dark" />
+        </div>
+        <div ref={barLightRef} className="absolute inset-x-0 top-0" style={{ opacity: 0 }}>
+          <TopBarInner tone="light" />
         </div>
       </header>
 
