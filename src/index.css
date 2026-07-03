@@ -10,6 +10,8 @@
   --color-paper: #f4f1ea;
   --color-sumi: #1c1a16;
   --color-workgold: #c89b3c;
+  /* Dark CONTACT close — midnight indigo, complements the blue-purple blade + gold */
+  --color-night: #12141d;
   --font-display: 'Archivo', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
   --font-dramatic: 'Cormorant Garamond', 'Georgia', serif;

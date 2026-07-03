@@ -185,8 +185,40 @@ const HERO_PAGES = 8 // hero + about + transition (unchanged feel)
 // EXACTLY (HERO_PAGES-1) pages of physical scroll regardless of this value, so the
 // hero/about/transition feel is pixel-identical.
 const STACK_PAGES = 1 // tiny tail after the section lands (was a 5-page sticky stack)
-const TOTAL_PAGES = HERO_PAGES + STACK_PAGES
+// STAGE 3 — CONTACT: appended scroll for the closing frame (projects → dark → katana rest).
+const CONTACT_PAGES = 2
+const TOTAL_PAGES = HERO_PAGES + STACK_PAGES + CONTACT_PAGES
 const KATANA_SCROLL = (HERO_PAGES - 1) / (TOTAL_PAGES - 1)
+
+/* ---- STAGE 3: CONTACT — the bare blade, displayed --------------------------------
+ * The closing frame, on its OWN dark tone (--color-night, a midnight indigo that
+ * complements the blue-purple blade + gold — deliberately NOT the hero's #0A0A0A).
+ * The projects rows clear off the cream, the night layer crossfades over it, and a
+ * SHARP-EDGED hexagon of the sakura tree art fills the LEFT half; the persistent
+ * katana re-materializes over it as the BARE BLADE — scabbard hidden, fully drawn,
+ * tilted, slowly rotating about its own long axis. No settle choreography: the blade
+ * simply fades in already displayed, spinning. The RIGHT half is the full contact
+ * stack (email · socials · form). All windows below live in q — the damped stack
+ * progress spanning the appended pages (raw KATANA_SCROLL → 1) — so contact
+ * choreography never touches the katana arc. q 0 → ~0.3 is a buffer page where the
+ * projects accordion stays interactive. */
+const C_CLEAR = { in: 0.3, out: 0.44 } // projects rows clear off the cream
+const C_NIGHT = { in: 0.34, out: 0.56 } // night layer + hexagon crossfade over the cream
+// NO glitch, NO travel: while the blade is still invisible, camera/pose/draw SNAP to
+// the final display state (C_SNAP), then the blade plain-fades in ALREADY in place
+// over the hexagon (C_FADE). The pixel-dissolve is never reversed here.
+const C_SNAP = 0.5 // snap point — everything invisible flips to the display state
+const C_FADE = { in: 0.54, out: 0.7 } // plain opacity fade-in of the displayed blade
+const C_HEAD = { in: 0.58, out: 0.72 } // eyebrow + "Contact" focus-pull
+const C_BODY = { in: 0.64, out: 0.8 } // email / socials / form
+const C_FOOT = { in: 0.72, out: 0.88 } // corners + footer line
+const C_PETAL = { amt: 0.12, in: 0.55, out: 0.8 } // sparse petal drift over the close
+// Final display framing: pull back and aim RIGHT of the blade so it sits over the
+// left-side hexagon artwork, sized to fit inside it.
+const CONTACT_OFF = new THREE.Vector3(0, 0, 9.0)
+const CONTACT_SHIFT_X = 1.85 // world units the aim sits right of the blade's center
+const CONTACT_TILT_DEG = -24 // in-plane diagonal of the displayed blade
+const CONTACT_SPIN = 0.3 // slow idle roll about the blade's own long axis, rad/s
 
 const damp = THREE.MathUtils.damp
 
@@ -417,7 +449,7 @@ type ClipData = {
   scabQuat: THREE.Quaternion
 }
 
-function Katana({ axesRef, progressRef }: DriveProps) {
+function Katana({ axesRef, progressRef, stackProgressRef }: DriveProps) {
   const { scene, animations } = useGLTF(MODEL_URL)
   const { actions, mixer } = useAnimations(animations, scene)
   const { size, gl } = useThree()
@@ -435,6 +467,17 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     []
   )
 
+  // CONTACT display orientation: the drawn-blade display pose (cd.displayQuat) tipped
+  // to a diagonal, then slowly rolled about the blade's own (tilted) long axis. The
+  // display pose maps the blade's length onto world X, so the tilted X is the spin axis.
+  const contactTiltQuat = useMemo(
+    () => new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(CONTACT_TILT_DEG)),
+    []
+  )
+  const contactSpinAxis = useMemo(() => new THREE.Vector3(1, 0, 0).applyQuaternion(contactTiltQuat), [contactTiltQuat])
+  const contactQuatTmp = useMemo(() => new THREE.Quaternion(), [])
+  const contactSpinTmp = useMemo(() => new THREE.Quaternion(), [])
+
   // Clip plane: starts "open" (constant huge ⇒ nothing clipped) until driven each frame.
   const clipPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(1, 0, 0), 1e9), [])
 
@@ -450,6 +493,10 @@ function Katana({ axesRef, progressRef }: DriveProps) {
 
   // Built-in clip, sampled for its end pose + the derived display/scabbard targets.
   const clipRef = useRef<ClipData | null>(null)
+
+  // The blade's cloned materials — collected so the CONTACT display can plain-fade
+  // the bare blade in via opacity (no pixel-dissolve, no motion).
+  const bladeMats = useRef<THREE.Material[]>([])
 
   // Center + scale to fill the frame. Recomputes on resize.
   useLayoutEffect(() => {
@@ -486,12 +533,14 @@ function Katana({ axesRef, progressRef }: DriveProps) {
           if (withClip) {
             c.clippingPlanes = [clipPlane]
             c.clipShadows = true
+            bladeMats.current.push(c) // blade clones — CONTACT fades these by opacity
           }
           addDissolve(c)
           return c
         }
         mesh.material = Array.isArray(mesh.material) ? mesh.material.map(bind) : bind(mesh.material)
       })
+    bladeMats.current = []
     bindNode(axes.sword, true)
     bindNode(axes.scabbard, false)
   }, [axes, gl, clipPlane, dissolve])
@@ -537,7 +586,7 @@ function Katana({ axesRef, progressRef }: DriveProps) {
   const mouthWorld = useMemo(() => new THREE.Vector3(), [])
   const axisWorld = useMemo(() => new THREE.Vector3(), [])
 
-  useFrame(() => {
+  useFrame((state) => {
     const cd = clipRef.current
     if (!cd) return
     const p = progressRef.current // the ONE smoothed progress — no per-element damping
@@ -547,17 +596,33 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     // (START_DRAWN); 0→0.2 draws fully out, held, 0.62→0.8 returns to the rest fraction.
     // The forward unsheathe keeps its easing; the REVERSE re-sheathe uses the heavier
     // smootherstep so it feels SLOW + WEIGHTED (deliberate, not a snap).
+    // STAGE 3 — CONTACT (driven by q, the appended stack progress): NO glitch, NO
+    // travel. At C_SNAP — while everything is still fully dissolved/invisible — the
+    // draw, pose, and scabbard flip straight to the final display state; the bare
+    // blade then plain-fades in via material opacity, already in place, spinning.
+    const cq = stackProgressRef?.current ?? 0
+    const cOn = cq > C_SNAP
+    const cFade = smoothstep(C_FADE.in, C_FADE.out, cq)
+    scabbard.visible = !cOn // hidden for the whole contact display
+
     const ramp =
       smoothstep(CLIP.in, CLIP.out, p) - smoother(clamp01((p - CLIP.backIn) / (CLIP.backOut - CLIP.backIn)))
-    const frac = START_DRAWN + (1 - START_DRAWN) * ramp
+    const frac = cOn ? 1 : START_DRAWN + (1 - START_DRAWN) * ramp
     cd.action.time = frac * cd.duration
     cd.mixer.update(0) // applies the blade pose for this clip time
 
     // PHASE 2 — the sheathed katana PIXELS OUT (blade + scabbard share these uniforms, so
     // they dissolve TOGETHER). Hide once fully dissolved so nothing lingers over the rows.
-    const kdiss = smoothstep(KDISS.in, KDISS.out, p)
+    // CONTACT never reverses the dissolve — it zeroes it (while invisible) and fades the
+    // blade's material opacity instead.
+    const kdiss = cOn ? 0 : smoothstep(KDISS.in, KDISS.out, p)
     dissolve.uKDissolve.value = kdiss
-    heroRef.current.visible = kdiss < 1
+    for (const m of bladeMats.current) {
+      const fading = cOn && cFade < 1
+      m.transparent = fading
+      m.opacity = fading ? cFade : 1
+    }
+    heroRef.current.visible = cOn ? cFade > 0 : kdiss < 1
 
     // SCABBARD: glide rest → parallel target (forward), then weighted reverse on the
     // re-sheathe (STEP 1) — heavier smootherstep, same slow/deliberate feel as the blade.
@@ -566,9 +631,15 @@ function Katana({ axesRef, progressRef }: DriveProps) {
     scabbard.position.lerpVectors(scab0, cd.scabPos, part)
     scabbard.quaternion.slerpQuaternions(scabQuat0, cd.scabQuat, part)
 
-    // POSE: diagonal hero → horizontal display, set directly from poseAmt(p).
+    // POSE: diagonal hero → horizontal display, set directly from poseAmt(p). CONTACT
+    // sets the tilted display pose + slow idle roll DIRECTLY (snapped while invisible).
     const poseAmt = plateau(p, POSE.in, POSE.out, POSE.backIn, POSE.backOut)
     poseRef.current.quaternion.slerpQuaternions(HERO_QUAT, cd.displayQuat, poseAmt)
+    if (cOn) {
+      contactSpinTmp.setFromAxisAngle(contactSpinAxis, state.clock.elapsedTime * CONTACT_SPIN)
+      contactQuatTmp.copy(cd.displayQuat).premultiply(contactTiltQuat).premultiply(contactSpinTmp)
+      poseRef.current.quaternion.copy(contactQuatTmp)
+    }
 
     // HERO ROLL: at rest the whole assembly is rolled so the handle reads upper-right;
     // eases to identity as you scroll in, handing off to the untouched choreography.
@@ -577,8 +648,9 @@ function Katana({ axesRef, progressRef }: DriveProps) {
 
     // CLIP PLANE: hide the blade still inside the sheath. Sits at the scabbard mouth,
     // normal along the bore tangent; anchored in the scabbard's LOCAL frame so it
-    // follows the scabbard. OFF during the fully-drawn display.
-    const clipOn = p <= CLIP_DRAW_CLEAR || p >= CLIP_RESHEATHE
+    // follows the scabbard. OFF during the fully-drawn display — and OFF for the whole
+    // CONTACT display, where the scabbard is hidden and the bare blade must be whole.
+    const clipOn = (p <= CLIP_DRAW_CLEAR || p >= CLIP_RESHEATHE) && !cOn
     if (clipOn) {
       scabbard.updateWorldMatrix(true, false)
       mouthWorld.copy(mouthLocal).applyMatrix4(scabbard.matrixWorld)
@@ -605,12 +677,13 @@ function Katana({ axesRef, progressRef }: DriveProps) {
  *  damped like a slow film dolly.
  * ========================================================================== */
 
-function Rig({ axesRef, progressRef }: DriveProps) {
+function Rig({ axesRef, progressRef, stackProgressRef }: DriveProps) {
   const { camera } = useThree()
 
   const focus = useMemo(() => new THREE.Vector3(), [])
   const aim = useMemo(() => new THREE.Vector3(), [])
   const heroAim = useMemo(() => new THREE.Vector3(), [])
+  const contactAim = useMemo(() => new THREE.Vector3(), [])
   const box = useMemo(() => new THREE.Box3(), [])
   const boxCenter = useMemo(() => new THREE.Vector3(), [])
   const pa = useMemo(() => new THREE.Vector3(), [])
@@ -651,6 +724,18 @@ function Rig({ axesRef, progressRef }: DriveProps) {
       aim.lerp(boxCenter, tAmt)
     }
 
+    // CONTACT display: SNAPPED framing (no travel) — flips while the blade is still
+    // invisible. Aim RIGHT of the BARE blade's own center (the scabbard is hidden
+    // there) so the spinning blade sits over the left-side hexagon artwork.
+    const cq = stackProgressRef?.current ?? 0
+    const cAmt = cq > C_SNAP ? 1 : 0
+    if (cAmt > 0) {
+      box.setFromObject(axes.sword)
+      box.getCenter(boxCenter)
+      contactAim.copy(boxCenter).addScaledVector(WORLD_RIGHT, CONTACT_SHIFT_X)
+      aim.lerp(contactAim, cAmt)
+    }
+
     const frameAmt = plateau(p, FRAME.in, FRAME.out, FRAME.backIn, FRAME.backOut)
     const driftAmt = plateau(p, DRIFT.a, DRIFT.b, DRIFT.c, DRIFT.d)
     // Hero zoom: push IN at scroll 0, ease back to the normal offset as the draw starts.
@@ -664,6 +749,8 @@ function Rig({ axesRef, progressRef }: DriveProps) {
     )
 
     off.copy(HERO_OFF).lerp(DISPLAY_OFF, frameAmt).multiplyScalar(zoom * tzoom).addScaledVector(DRIFT_DIR, driftAmt)
+    // CONTACT: ease the offset out to the final rest framing (pulled back, dead-on).
+    off.lerp(CONTACT_OFF, cAmt)
     camera.position.copy(aim).add(off)
     camera.lookAt(aim)
   })
@@ -692,7 +779,13 @@ type Petal = {
   rank: number // 0..1 presence threshold — low ranks show first (faint hero)
 }
 
-function PetalField({ progressRef }: { progressRef: React.MutableRefObject<number> }) {
+function PetalField({
+  progressRef,
+  stackProgressRef,
+}: {
+  progressRef: React.MutableRefObject<number>
+  stackProgressRef?: React.MutableRefObject<number>
+}) {
   const { camera } = useThree()
   const { scene } = useGLTF(PETAL_URL)
   const meshRef = useRef<THREE.InstancedMesh>(null!)
@@ -794,13 +887,17 @@ function PetalField({ progressRef }: { progressRef: React.MutableRefObject<numbe
 
     // Presence from scroll ONLY: faint over the hero, fuller across the about, then
     // faded out as the sword dissolves so the field clears off the clean landscape.
+    // CONTACT: a sparse drift returns over the resting blade — nothing else moves.
     const p = progressRef.current
+    const cq = stackProgressRef?.current ?? 0
     const presence =
       THREE.MathUtils.lerp(
         PETAL_PRESENCE.hero,
         PETAL_PRESENCE.about,
         smoothstep(PETAL_PRESENCE.in, PETAL_PRESENCE.out, p)
-      ) * (1 - smoothstep(PETAL_FADE.in, PETAL_FADE.out, p))
+      ) *
+        (1 - smoothstep(PETAL_FADE.in, PETAL_FADE.out, p)) +
+      C_PETAL.amt * smoothstep(C_PETAL.in, C_PETAL.out, cq)
     material.opacity = PETAL_MAX_OPACITY * presence
 
     const t = state.clock.elapsedTime
@@ -891,11 +988,11 @@ function Scene({ axesRef, progressRef, stackProgressRef }: DriveProps) {
       {/* Studio HDRI for real metal reflections — kept OUT of the background. */}
       <Environment preset="studio" background={false} />
 
-      <Katana axesRef={axesRef} progressRef={progressRef} />
-      <Rig axesRef={axesRef} progressRef={progressRef} />
+      <Katana axesRef={axesRef} progressRef={progressRef} stackProgressRef={stackProgressRef} />
+      <Rig axesRef={axesRef} progressRef={progressRef} stackProgressRef={stackProgressRef} />
       {/* Ambient sakura field — behind/around the sword, after Rig so it locks to
           the camera the Rig has already placed this frame. */}
-      <PetalField progressRef={progressRef} />
+      <PetalField progressRef={progressRef} stackProgressRef={stackProgressRef} />
     </>
   )
 }
@@ -1015,12 +1112,14 @@ function drawLabel(c: HTMLCanvasElement, text: string) {
   const x = c.width / 2
   const y = c.height / 2 + 8
   ctx.fillStyle = '#ECE8E1' // washi — light text against the dark mountains
-  // soft dark scrim/glow baked into the texture so the word holds over the busy image
-  ctx.shadowColor = 'rgba(0,0,0,0.7)'
-  ctx.shadowBlur = 44
+  // ONE soft, tight scrim pass — enough to hold over the busy image without the
+  // muddy blob a heavy double-pass halo left behind.
+  ctx.shadowColor = 'rgba(0,0,0,0.45)'
+  ctx.shadowBlur = 22
+  ctx.shadowOffsetY = 4
   ctx.fillText(text, x, y)
-  ctx.fillText(text, x, y) // second pass deepens the halo
   ctx.shadowBlur = 0
+  ctx.shadowOffsetY = 0
   ctx.fillText(text, x, y) // crisp light text on top
 }
 function makeLabelTexture(text: string) {
@@ -1048,7 +1147,7 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
     tex.needsUpdate = true
   }, [tex])
 
-  const labelTex = useMemo(() => makeLabelTexture('projects'), [])
+  const labelTex = useMemo(() => makeLabelTexture('Projects'), [])
 
   // The label face (Bricolage Grotesque) is web-loaded; redraw the texture once it's ready
   // so the intro wordmark matches the light section's "Projects" header exactly.
@@ -1056,7 +1155,7 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
     let alive = true
     const redraw = () => {
       if (!alive) return
-      drawLabel(labelTex.image as HTMLCanvasElement, 'projects')
+      drawLabel(labelTex.image as HTMLCanvasElement, 'Projects')
       labelTex.needsUpdate = true
     }
     document.fonts.load("700 320px 'Bricolage Grotesque'").then(redraw, redraw)
@@ -1486,24 +1585,190 @@ function ProjectsSection({
   )
 }
 
-/* One copy of the sticky top bar in a given theme. Two are stacked + crossfaded so the bar
- * reads on the dark hero/about AND the cream projects section. The active pill follows the
- * theme: About highlights on dark, Projects highlights on light. */
-function TopBarInner({ tone }: { tone: 'dark' | 'light' }) {
+/* ---- CONTACT (STAGE 3 — the bare blade, displayed) ----------------------------
+ * The closing frame, on the dark night tone. TWO fixed layers driven by the App tick:
+ *   • nightRef (z-2, behind the canvas) — the night backdrop + the SHARP-EDGED hexagon
+ *     of the sakura tree art on the LEFT half, under the spinning blade.
+ *   • layerRef (z-45, above the canvas) — the full contact stack on the RIGHT half, so
+ *     the email button / social icons / form actually receive events;
+ *     pointer-events-none at the layer, interactive elements opt back in.
+ * headRef/bodyRef/footRef get the site's shared blur-to-sharp focus pull, sequenced
+ * header → content → corners — all driven by the App tick off q. */
+const CONTACT_EMAIL = 'hello@example.com' // PLACEHOLDER — real address supplied later
+
+// Sharp hexagon crop for the sakura art (pointy-top). Utilities can't express the
+// polygon cleanly, so it's an inline style object per house rules.
+const HEX_CLIP: React.CSSProperties = {
+  clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)',
+}
+
+// Social icons — inline SVG paths (simple-icons geometry), filled with currentColor.
+const CONTACT_SOCIALS = [
+  {
+    label: 'GITHUB',
+    href: '#', // PLACEHOLDER
+    path: 'M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12',
+  },
+  {
+    label: 'LINKEDIN',
+    href: '#', // PLACEHOLDER
+    path: 'M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z',
+  },
+] // PLACEHOLDER hrefs — supplied later
+const CONTACT_RESUME_HREF = '#' // PLACEHOLDER
+
+const FIELD_LABEL = 'font-mono text-[0.62rem] tracking-[0.28em] uppercase text-washi/45'
+const FIELD_INPUT =
+  'pointer-events-auto mt-2 w-full rounded-none border-b border-washi/20 bg-transparent py-2 font-hanken text-[0.95rem] text-washi outline-none transition-colors duration-300 focus:border-gold'
+
+type ContactRefs = {
+  nightRef: React.RefObject<HTMLDivElement>
+  layerRef: React.RefObject<HTMLDivElement>
+  headRef: React.RefObject<HTMLDivElement>
+  bodyRef: React.RefObject<HTMLDivElement>
+  footRef: React.RefObject<HTMLDivElement>
+}
+
+function ContactSection({ nightRef, layerRef, headRef, bodyRef, footRef }: ContactRefs) {
+  const [copied, setCopied] = useState(false)
+  const copyTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(copyTimer.current), [])
+
+  const copyEmail = () => {
+    navigator.clipboard?.writeText(CONTACT_EMAIL).catch(() => {})
+    setCopied(true)
+    window.clearTimeout(copyTimer.current)
+    copyTimer.current = window.setTimeout(() => setCopied(false), 1800)
+  }
+
+  return (
+    <>
+      {/* night backdrop + LEFT hexagon — behind the canvas, under the spinning blade */}
+      <div ref={nightRef} style={{ opacity: 0 }} className="fixed inset-0 z-[2] bg-night pointer-events-none">
+        <div
+          className="absolute left-[7vw] top-1/2 -translate-y-1/2 w-[min(36vw,58vh)] aspect-[0.866]"
+          style={HEX_CLIP}
+        >
+          <div className="absolute inset-0 bg-[url('/Sakura_tree_bg.png')] bg-cover bg-center" />
+          {/* faint dark wash so the blade reads over the busy art */}
+          <div className="absolute inset-0 bg-night/30" />
+        </div>
+      </div>
+
+      {/* RIGHT — the full contact stack, above the canvas so events land */}
+      <div
+        ref={layerRef}
+        style={{ visibility: 'hidden' }}
+        className="fixed inset-0 z-[45] pointer-events-none font-hanken text-washi"
+      >
+        <div className="absolute inset-y-0 right-0 flex w-full flex-col justify-center gap-11 px-[7vw] md:w-[52vw] md:pl-0 md:pr-[6vw]">
+          {/* header — same eyebrow/headline pattern as the other sections */}
+          <div ref={headRef} style={{ opacity: 0 }}>
+            <div className="font-mono text-[0.72rem] tracking-[0.24em] uppercase text-gold">
+              結 — THE BLADE RESTS
+            </div>
+            <h2 className="mt-3 font-display font-black leading-[0.9] tracking-[-0.03em] text-washi text-[clamp(2.8rem,6.5vw,5.5rem)]">
+              Contact
+            </h2>
+          </div>
+
+          <div ref={bodyRef} style={{ opacity: 0 }} className="flex flex-col gap-10">
+            {/* primary — email, click-to-copy */}
+            <button type="button" onClick={copyEmail} className="pointer-events-auto group w-fit text-left">
+              <span
+                className={`block font-mono text-[0.62rem] tracking-[0.28em] uppercase transition-colors duration-300 ${copied ? 'text-gold' : 'text-washi/45'}`}
+              >
+                {copied ? 'COPIED ✓' : 'EMAIL — CLICK TO COPY'}
+              </span>
+              <span className="mt-2 block font-display font-bold tracking-[-0.02em] text-washi transition-colors duration-300 group-hover:text-gold text-[clamp(1.4rem,2.6vw,2.3rem)]">
+                {CONTACT_EMAIL}
+              </span>
+            </button>
+
+            {/* socials — icons + resume */}
+            <div className="flex items-center gap-7">
+              {CONTACT_SOCIALS.map((s) => (
+                <a
+                  key={s.label}
+                  href={s.href}
+                  aria-label={s.label}
+                  className="pointer-events-auto text-washi/60 transition-colors duration-300 hover:text-gold"
+                >
+                  <svg viewBox="0 0 24 24" className="h-6 w-6" fill="currentColor" aria-hidden>
+                    <path d={s.path} />
+                  </svg>
+                </a>
+              ))}
+              <a
+                href={CONTACT_RESUME_HREF}
+                className="pointer-events-auto font-mono text-[0.68rem] tracking-[0.22em] text-washi/60 transition-colors duration-300 hover:text-gold"
+              >
+                RESUME (PDF)
+              </a>
+            </div>
+
+            <div className="h-px bg-washi/10" />
+
+            {/* the form — visual only in this stage; wiring lands in Stage 2 */}
+            <form className="flex flex-col gap-7" onSubmit={(e) => e.preventDefault()}>
+              <div className="grid gap-7 sm:grid-cols-2">
+                <label className="block">
+                  <span className={FIELD_LABEL}>NAME</span>
+                  <input type="text" name="name" autoComplete="name" className={FIELD_INPUT} />
+                </label>
+                <label className="block">
+                  <span className={FIELD_LABEL}>EMAIL</span>
+                  <input type="email" name="email" autoComplete="email" className={FIELD_INPUT} />
+                </label>
+              </div>
+              <label className="block">
+                <span className={FIELD_LABEL}>MESSAGE</span>
+                <textarea name="message" rows={3} className={`${FIELD_INPUT} resize-none`} />
+              </label>
+              <button
+                type="submit"
+                className="pointer-events-auto mt-1 w-fit rounded-none border border-gold px-10 py-3 font-mono text-[0.68rem] tracking-[0.3em] uppercase text-gold transition-colors duration-300 hover:bg-gold hover:text-night"
+              >
+                SEND
+              </button>
+            </form>
+          </div>
+        </div>
+
+        {/* corners + footer — the hero's instrument-panel language, closing the loop */}
+        <div ref={footRef} style={{ opacity: 0 }} className="absolute inset-0">
+          <div className={`absolute bottom-6 left-6 md:bottom-10 md:left-10 ${MONO}`}>SEC.04 — REST</div>
+          <div className={`absolute bottom-6 right-6 md:bottom-10 md:right-10 text-right ${MONO}`}>
+            BLADE AT REST <span className="text-gold ml-1">結</span>
+          </div>
+          <div className="absolute bottom-[2.5vh] left-1/2 -translate-x-1/2 whitespace-nowrap font-mono text-[0.56rem] tracking-[0.2em] uppercase text-washi/35">
+            © 2026 ABHAYANTH K · FORGED WITH NEXT.JS + R3F
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
+
+/* One copy of the sticky top bar in a given theme. Three are stacked + crossfaded so the
+ * bar reads on the dark hero/about, the cream projects section, AND the dark contact
+ * close — each copy highlighting its own section's pill. */
+function TopBarInner({ tone, active }: { tone: 'dark' | 'light'; active: 'about' | 'projects' | 'contact' }) {
   const dark = tone === 'dark'
   const grad = dark ? 'from-ink/70 via-ink/25' : 'from-paper/80 via-paper/30'
   const mark = dark ? 'text-gold' : 'text-workgold'
   const idle = dark ? 'border-washi/15 text-washi/70' : 'border-sumi/15 text-sumi/70'
   const hot = dark ? 'border-gold/50 text-gold' : 'border-workgold/60 text-workgold'
+  const pill = (name: typeof active) => `${PILL} ${active === name ? hot : idle}`
   return (
     <div className={`bg-linear-to-b ${grad} to-transparent`}>
       <div className="flex items-center justify-between px-6 md:px-10 h-16 md:h-20">
         <span className={`text-2xl leading-none ${mark} pointer-events-auto select-none`}>鍛</span>
         <nav className="flex gap-1.5 pointer-events-auto">
-          <span className={`${PILL} ${dark ? hot : idle}`}>About</span>
-          <span className={`${PILL} ${dark ? idle : hot}`}>Projects</span>
+          <span className={pill('about')}>About</span>
+          <span className={pill('projects')}>Projects</span>
           <span className={`${PILL} ${idle}`}>CP</span>
-          <span className={`${PILL} ${idle}`}>Contact</span>
+          <span className={pill('contact')}>Contact</span>
         </nav>
       </div>
     </div>
@@ -1532,10 +1797,18 @@ export default function App() {
   const paperRef = useRef<HTMLDivElement>(null) // cream backdrop (z-1) — the dissolve's reveal target
   const rowsRef = useRef<HTMLDivElement>(null) // LIGHT projects content (z-40), revealed as the landscape dissolves
   const projectsHeaderRef = useRef<HTMLDivElement>(null) // section heading — shared blur-to-sharp focus pull
-  // Top bar crossfade: a dark copy (hero/about) and a light copy (over the cream projects)
-  // stacked, opacity-swapped as the section lands so the bar stays legible on either theme.
+  // Top bar crossfade: a dark copy (hero/about), a light copy (cream projects), and a
+  // dark CONTACT copy — opacity-swapped as each section lands so the bar stays legible.
   const barDarkRef = useRef<HTMLDivElement>(null)
   const barLightRef = useRef<HTMLDivElement>(null)
+  const barContactRef = useRef<HTMLDivElement>(null)
+
+  // STAGE 3 — CONTACT refs (night backdrop + hexagon, and the contact stack).
+  const contactNightRef = useRef<HTMLDivElement>(null)
+  const contactLayerRef = useRef<HTMLDivElement>(null)
+  const contactHeadRef = useRef<HTMLDivElement>(null)
+  const contactBodyRef = useRef<HTMLDivElement>(null)
+  const contactFootRef = useRef<HTMLDivElement>(null)
 
   // The ENTIRE hero overlay (tree + name + HUD) scrolls UP and out as ONE block,
   // tied to the shared progress so it matches the unsheathe pace. NOT fading in place.
@@ -1575,25 +1848,47 @@ export default function App() {
       // revealed (fades in BEHIND the landscape) as the landscape pixel-dissolves away.
       if (aboutLayerRef.current)
         aboutLayerRef.current.style.opacity = `${1 - smoothstep(ABOUT_CLEAR.in, ABOUT_CLEAR.out, p)}`
+      // STAGE 3 — CONTACT (driven by q, the appended stack progress): the projects rows
+      // clear off the cream, the NIGHT layer + hexagon crossfade over it, then the
+      // contact content focus-pulls in sequence (header → body → corners).
+      const q = stackProgressRef.current
+      const cClear = smoothstep(C_CLEAR.in, C_CLEAR.out, q)
+
       // Cream backdrop fills in early (hidden behind the opaque landscape) so the glitch-out
-      // reveals cream; the interactive content resolves with the dissolve.
+      // reveals cream — it holds; the night layer simply crossfades OVER it for contact.
       if (paperRef.current) paperRef.current.style.opacity = `${smoothstep(PAPER_IN.in, PAPER_IN.out, p)}`
+      if (contactNightRef.current)
+        contactNightRef.current.style.opacity = `${smoothstep(C_NIGHT.in, C_NIGHT.out, q)}`
       if (rowsRef.current) {
-        rowsRef.current.style.opacity = `${smoothstep(ROWS_IN.in, ROWS_IN.out, p)}`
+        rowsRef.current.style.opacity = `${smoothstep(ROWS_IN.in, ROWS_IN.out, p) * (1 - cClear)}`
         // Gate interactivity: visibility:hidden also blocks the z-40 buttons from swallowing
         // wheel/clicks over the hero/about (where the section is invisible), so the katana
-        // scroll stays intact until the projects section has actually landed.
-        rowsRef.current.style.visibility = p > 0.985 ? 'visible' : 'hidden'
+        // scroll stays intact until the projects section has actually landed — and again
+        // once the contact zone has taken over.
+        rowsRef.current.style.visibility = p > 0.985 && cClear < 0.5 ? 'visible' : 'hidden'
       }
 
       // Section heading sharpens in with the section (same blur-to-sharp focus pull as About).
       driveFocus(projectsHeaderRef.current, smoothstep(ROWS_IN.in, ROWS_IN.out, p))
 
-      // STAGE 2 — top bar theme: crossfade dark → light over the glitch-out so the bar reads
-      // on cream once the projects section lands (synced with the label + section reveal).
-      const lit = smoothstep(LABEL_IN.in, ROWS_IN.out, p)
+      // CONTACT content: sequenced focus-pulls over the held paper.
+      driveFocus(contactHeadRef.current, smoothstep(C_HEAD.in, C_HEAD.out, q))
+      driveFocus(contactBodyRef.current, smoothstep(C_BODY.in, C_BODY.out, q))
+      driveFocus(contactFootRef.current, smoothstep(C_FOOT.in, C_FOOT.out, q))
+      // Same interactivity gate as the projects rows: the z-45 layer only exists once
+      // the contact zone is actually on screen.
+      if (contactLayerRef.current)
+        contactLayerRef.current.style.visibility = q > 0.55 ? 'visible' : 'hidden'
+
+      // Top bar theme: dark (hero/about) → light (projects) → dark again with the
+      // Contact pill hot (night contact) — copies crossfaded per section. The light
+      // copy waits for the glitch-out (LAND_VANISH) so its paper gradient NEVER shows
+      // as a white band over the dark landscape/label moment.
+      const lit = smoothstep(LAND_VANISH.in, ROWS_IN.out, p)
+      const nightIn = smoothstep(C_NIGHT.in, C_NIGHT.out, q)
       if (barDarkRef.current) barDarkRef.current.style.opacity = `${1 - lit}`
-      if (barLightRef.current) barLightRef.current.style.opacity = `${lit}`
+      if (barLightRef.current) barLightRef.current.style.opacity = `${lit * (1 - nightIn)}`
+      if (barContactRef.current) barContactRef.current.style.opacity = `${lit * nightIn}`
 
       raf = requestAnimationFrame(tick)
     }
@@ -1616,6 +1911,16 @@ export default function App() {
           cleanly; pointer-events-none so the wheel still drives the katana scroll (only the
           row buttons + live-demo links opt back in). */}
       <ProjectsSection paperRef={paperRef} rowsRef={rowsRef} headerRef={projectsHeaderRef} />
+
+      {/* Layer 1.2 — CONTACT (STAGE 3): the night close. Backdrop + hexagon at z-2 (under
+          the spinning blade on the canvas, z-3); the contact stack at z-45. */}
+      <ContactSection
+        nightRef={contactNightRef}
+        layerRef={contactLayerRef}
+        headRef={contactHeadRef}
+        bodyRef={contactBodyRef}
+        footRef={contactFootRef}
+      />
 
       {/* Layer 2 — CLEAN, vibrant PROJECTS landscape (own canvas). Transparent until
           the zone; fades in behind the dissolving sword, then pixel-dissolves itself. */}
@@ -1772,10 +2077,13 @@ export default function App() {
           either theme. The wordmark + tagline live in the hero and scroll away. */}
       <header className="fixed top-0 inset-x-0 z-50 pointer-events-none">
         <div ref={barDarkRef} className="absolute inset-x-0 top-0">
-          <TopBarInner tone="dark" />
+          <TopBarInner tone="dark" active="about" />
         </div>
         <div ref={barLightRef} className="absolute inset-x-0 top-0" style={{ opacity: 0 }}>
-          <TopBarInner tone="light" />
+          <TopBarInner tone="light" active="projects" />
+        </div>
+        <div ref={barContactRef} className="absolute inset-x-0 top-0" style={{ opacity: 0 }}>
+          <TopBarInner tone="dark" active="contact" />
         </div>
       </header>
 
