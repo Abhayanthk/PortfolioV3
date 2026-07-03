@@ -135,6 +135,10 @@ const PETAL_MAX_OPACITY = 0.8
 // Presence vs. scroll: faint in the hero, only a touch more in the about — kept
 // light/unobtrusive there so the beats stay the focus.
 const PETAL_PRESENCE = { hero: 0.16, about: 0.3, in: 0.16, out: 0.5 }
+// WIND over the landscape hold: petals return as a sparse gusty sweep blowing across
+// the frame (the "wind of flowers"), gone again by the glitch-out. `speed` is the base
+// horizontal drift (units/s); gusts modulate it ±35% on two slow sine bands.
+const PETAL_WIND = { presence: 0.42, speed: 1.5, in: 0.94, out: 0.97 }
 const PETAL_RANK_BAND = 0.18 // soft window each petal fades in/out across
 const PETAL_RIM = '#d9b25a' // faint gold edge-light, tying petals to the sword's gold
 
@@ -901,10 +905,12 @@ function PetalField({
     mesh.quaternion.copy(camera.quaternion)
 
     // Presence from scroll ONLY: faint over the hero, fuller across the about, then
-    // faded out as the sword dissolves so the field clears off the clean landscape.
+    // faded out as the sword dissolves so the field clears off the clean landscape —
+    // EXCEPT the WIND window, where they return sweeping across the landscape hold.
     // CONTACT: a sparse drift returns over the resting blade — nothing else moves.
     const p = progressRef.current
     const cq = stackProgressRef?.current ?? 0
+    const windAmt = plateau(p, PETAL_WIND.in, PETAL_WIND.out, LAND_VANISH.in, LAND_VANISH.out)
     const presence =
       THREE.MathUtils.lerp(
         PETAL_PRESENCE.hero,
@@ -912,18 +918,29 @@ function PetalField({
         smoothstep(PETAL_PRESENCE.in, PETAL_PRESENCE.out, p)
       ) *
         (1 - smoothstep(PETAL_FADE.in, PETAL_FADE.out, p)) +
+      PETAL_WIND.presence * windAmt +
       C_PETAL.amt * smoothstep(C_PETAL.in, C_PETAL.out, cq)
     material.opacity = PETAL_MAX_OPACITY * presence
 
     const t = state.clock.elapsedTime
     const span = PETAL_FIELD_H * 2
+    const spanW = PETAL_FIELD_W * 2
+    // Gusty wind travel — the integral of a speed that surges on two slow sine bands
+    // (±35%), so drift stays continuous in t while visibly gusting and lulling.
+    const gustTravel = (t + 0.35 * (-2 * Math.cos(0.5 * t) - 4.35 * Math.cos(0.23 * t + 1.7))) * PETAL_WIND.speed
 
     for (let i = 0; i < PETAL_COUNT; i++) {
       const pt = petals[i]
       // TIME-driven fall with modulo recycle — top → bottom → top, forever.
       const travelled = (t * pt.fall + pt.yPhase * span) % span
       const y = PETAL_FIELD_H - travelled
-      const x = pt.x + pt.swayAmp * Math.sin(t * pt.swayFreq + pt.swayPhase)
+      let x = pt.x + pt.swayAmp * Math.sin(t * pt.swayFreq + pt.swayPhase)
+      if (windAmt > 0.001) {
+        // Horizontal sweep with wraparound; per-petal speed factor keeps depth layers
+        // moving at different rates so the wind reads volumetric, not like a sheet.
+        const xw = ((((pt.x + gustTravel * (0.7 + 0.6 * pt.yPhase)) % spanW) + spanW) % spanW) - PETAL_FIELD_W
+        x = THREE.MathUtils.lerp(x, xw, windAmt)
+      }
 
       // Presence gate: each petal fades in (scale) once presence passes its rank.
       const vis = clamp01((presence - pt.rank) / PETAL_RANK_BAND)
@@ -1047,10 +1064,23 @@ const LAND_FRAG = /* glsl */ `
   uniform float uBlocks;   // block count (vertical)
   uniform vec3 uOutColor;  // single glitch-out tone (projects bg)
   uniform vec2 uPan;       // mouse pan offset into the cropped image margin
+  uniform float uTime;     // seconds — drives the LIVING layers (mist, glint, sheen)
   varying vec2 vUv;
 
   float lHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
   float lSmoother(float t) { t = clamp(t, 0.0, 1.0); return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+
+  // Smooth value noise — basis for the drifting valley mist.
+  float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = lHash(i);
+    float b = lHash(i + vec2(1.0, 0.0));
+    float c = lHash(i + vec2(0.0, 1.0));
+    float d = lHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
 
   // 9-tap blur of the label texture → clean blur-to-sharp (never garbled).
   vec4 labelBlur(vec2 uv, float r) {
@@ -1085,13 +1115,37 @@ const LAND_FRAG = /* glsl */ `
     // underlay) — the per-block alpha below IS the glitch.
     vec3 col = img;
 
-    // PHASE 3 label — clean blur-to-sharp, aspect-preserved, centered.
+    // LIVING LAYERS — only while the clean landscape is actually up.
+    float liveAmt = uReveal * (1.0 - uVanish);
+    if (liveAmt > 0.001) {
+      // Valley mist: two counter-drifting noise sheets, masked to the mid band where
+      // the valleys/water sit, tinted pale washi-lavender so it reads as fog.
+      float m1 = vnoise(vec2(uvc.x * 3.0 + uTime * 0.02, uvc.y * 6.0));
+      float m2 = vnoise(vec2(uvc.x * 5.0 - uTime * 0.013, uvc.y * 9.0 + 3.7));
+      float mist = m1 * 0.6 + m2 * 0.4;
+      float band = smoothstep(0.18, 0.38, uvc.y) * (1.0 - smoothstep(0.52, 0.72, uvc.y));
+      col = mix(col, vec3(0.82, 0.78, 0.80), mist * mist * band * 0.30 * liveAmt);
+
+      // Gold glint: a slow diagonal light band (~9s cycle) that only lands on the
+      // warm/bright pixels, so the gilded linework + moon catch it like real leaf.
+      float sPos = mix(-0.3, 1.3, fract(uTime / 9.0)) * 1.35;
+      float g = exp(-pow((vUv.x + vUv.y * 0.35 - sPos) / 0.07, 2.0));
+      float lum = dot(img, vec3(0.299, 0.587, 0.114));
+      float warm = clamp((img.r + img.g * 0.6 - img.b * 1.2) * 2.0, 0.0, 1.0);
+      col += vec3(1.0, 0.85, 0.5) * g * warm * lum * 0.45 * liveAmt;
+    }
+
+    // PHASE 3 label — clean blur-to-sharp, aspect-preserved, centered; a whisper of
+    // vertical float + a slow gold sheen sweeping through the letters keep it alive.
     vec2 lsize = vec2(uLabelH * uLabelAspect / canvasAspect, uLabelH);
     vec2 luv = (vUv - 0.5) / lsize + 0.5;
+    luv.y += sin(uTime * 0.6) * 0.012;
     if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) {
       float li = lSmoother(uLabelIn);
       vec4 lab = labelBlur(luv, (1.0 - li) * 0.03);
-      col = mix(col, lab.rgb, lab.a * li);
+      float sheen = exp(-pow((luv.x - fract(uTime / 6.0) * 1.6 + 0.3) / 0.08, 2.0));
+      vec3 labCol = lab.rgb + vec3(1.0, 0.85, 0.5) * sheen * 0.35;
+      col = mix(col, labCol, lab.a * li);
     }
 
     // PHASE 4 glitch-OUT: each block flips to ONE bg color, then is removed → section.
@@ -1198,6 +1252,7 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
       // matches the #0A0A0A rows bg exactly.
       uOutColor: { value: new THREE.Color().setStyle(LAND_OUT_COLOR, THREE.LinearSRGBColorSpace) },
       uPan: { value: new THREE.Vector2(0, 0) },
+      uTime: { value: 0 },
     }),
     [tex, labelTex]
   )
@@ -1213,8 +1268,9 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
     return () => window.removeEventListener('pointermove', onMove)
   }, [mouse])
 
-  useFrame((_, dt) => {
+  useFrame((state, dt) => {
     const p = progressRef.current
+    uniforms.uTime.value = state.clock.elapsedTime
     uniforms.uRes.value.set(size.width, size.height)
     uniforms.uReveal.value = smoothstep(LAND_REVEAL.in, LAND_REVEAL.out, p)
     uniforms.uLabelIn.value = smoothstep(LABEL_IN.in, LABEL_IN.out, p)
@@ -1785,7 +1841,7 @@ function ContactSection({ nightRef, layerRef, headRef, bodyRef, footRef }: Conta
 
         {/* corners + footer — the hero's instrument-panel language, closing the loop */}
         <div ref={footRef} style={{ opacity: 0 }} className="absolute inset-0">
-          <div className={`absolute bottom-6 left-6 md:bottom-10 md:left-10 ${MONO}`}>SEC.04 — REST</div>
+          <div className={`absolute bottom-6 left-6 md:bottom-10 md:left-10 ${MONO}`}>SEC.03 — REST</div>
           <div className={`absolute bottom-6 right-6 md:bottom-10 md:right-10 text-right ${MONO}`}>
             BLADE AT REST <span className="text-gold ml-1">結</span>
           </div>
@@ -1870,6 +1926,8 @@ export default function App() {
   const progressFillRef = useRef<HTMLSpanElement>(null) // live scroll rail fill
   const instrumentRef = useRef<HTMLDivElement>(null) // persistent panel — theme-aware ink
   const railTrackRef = useRef<HTMLSpanElement>(null) // scroll rail track — theme-aware
+  const secLabelRef = useRef<HTMLSpanElement>(null) // left-edge section label — follows section
+  const secKanjiRef = useRef<HTMLSpanElement>(null) // left-edge kanji column — follows section
 
   // ABOUT overlay refs (STAGE 1) — fade/scale in place, driven below.
   const concentrateRef = useRef<HTMLDivElement>(null)
@@ -1986,6 +2044,18 @@ export default function App() {
         instrumentRef.current.style.color = panelLight ? 'rgba(28,26,22,0.5)' : 'rgba(236,232,225,0.25)'
       if (railTrackRef.current)
         railTrackRef.current.style.backgroundColor = panelLight ? 'rgba(28,26,22,0.16)' : 'rgba(236,232,225,0.12)'
+
+      // Left-edge section label follows the current section: FORGE (hero/about) →
+      // WORK (projects) → REST (contact close).
+      const [secLabel, secKanji] = panelLight
+        ? ['Sec.02 — Work', '作 作 作']
+        : nightIn > 0.5
+          ? ['Sec.03 — Rest', '結 結 結']
+          : ['Sec.01 — Forge', '鍛 鍛 鍛']
+      if (secLabelRef.current && secLabelRef.current.textContent !== secLabel) {
+        secLabelRef.current.textContent = secLabel
+        if (secKanjiRef.current) secKanjiRef.current.textContent = secKanji
+      }
 
       raf = requestAnimationFrame(tick)
     }
@@ -2161,10 +2231,15 @@ export default function App() {
         className="fixed inset-0 z-[15] pointer-events-none font-mono select-none transition-colors duration-500"
         style={{ color: 'rgba(236,232,225,0.25)' }}
       >
-        {/* left edge — section label + faint vertical kanji column */}
+        {/* left edge — section label + faint vertical kanji column (both follow the
+            current section, swapped by the tick) */}
         <div className="absolute left-[1.6vw] top-1/2 -translate-y-1/2 flex items-center gap-4 [writing-mode:vertical-rl] rotate-180">
-          <span className="text-[0.6rem] tracking-[0.5em] uppercase">Sec.01 — Forge</span>
-          <span className="text-base tracking-[0.4em] text-gold/20">鍛 鍛 鍛</span>
+          <span ref={secLabelRef} className="text-[0.6rem] tracking-[0.5em] uppercase">
+            Sec.01 — Forge
+          </span>
+          <span ref={secKanjiRef} className="text-base tracking-[0.4em] text-gold/20">
+            鍛 鍛 鍛
+          </span>
         </div>
         {/* right edge — live scroll-progress rail + numeric readout */}
         <div className="absolute right-[1.7vw] top-1/2 -translate-y-1/2 flex flex-col items-center gap-3">
