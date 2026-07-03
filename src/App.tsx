@@ -1235,6 +1235,7 @@ type Project = {
   stack: string[]
   features: string[]
   href: string
+  video?: string // looping demo clip; when set, replaces the striped placeholder
 }
 
 const PROJECTS: Project[] = [
@@ -1293,6 +1294,7 @@ const PROJECTS: Project[] = [
     stack: ['[PLACEHOLDER]'],
     features: ['[PLACEHOLDER — user will provide]'],
     href: '#',
+    video: '/Achron.mp4',
   },
 ]
 
@@ -1390,19 +1392,31 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
               </a>
             </div>
 
-            {/* right — VIDEO placeholder (reference styling). The <video> slot is ready: drop a
-                looping muted clip in `src` and remove the striped/overlay placeholder below. */}
+            {/* right — demo media. A real looping clip when `project.video` is set;
+                otherwise the striped "demo reel" placeholder (reference styling). */}
             <div className="relative aspect-[4/3] overflow-hidden rounded-[14px] bg-[#e7e2d6] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.06)] md:aspect-auto md:h-[33vh]">
-              <video className="absolute inset-0 h-full w-full object-cover" autoPlay muted loop playsInline />
-              <div className="absolute inset-0" style={STRIPE_FILL} />
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3.5">
-                <span className="grid h-[62px] w-[62px] place-items-center rounded-full bg-sumi">
-                  <span className="ml-[3px] block h-0 w-0 border-y-[9px] border-l-[15px] border-y-transparent border-l-paper" />
-                </span>
-                <span className="rounded-md bg-paper/80 px-2.5 py-1 font-mono text-[0.62rem] tracking-[0.2em] text-[#8a8276]">
-                  {project.num} — DEMO REEL
-                </span>
-              </div>
+              {project.video ? (
+                <video
+                  className="absolute inset-0 h-full w-full object-cover"
+                  src={project.video}
+                  autoPlay
+                  muted
+                  loop
+                  playsInline
+                />
+              ) : (
+                <>
+                  <div className="absolute inset-0" style={STRIPE_FILL} />
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3.5">
+                    <span className="grid h-[62px] w-[62px] place-items-center rounded-full bg-sumi">
+                      <span className="ml-[3px] block h-0 w-0 border-y-[9px] border-l-[15px] border-y-transparent border-l-paper" />
+                    </span>
+                    <span className="rounded-md bg-paper/80 px-2.5 py-1 font-mono text-[0.62rem] tracking-[0.2em] text-[#8a8276]">
+                      {project.num} — DEMO REEL
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>
