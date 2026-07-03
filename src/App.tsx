@@ -1351,6 +1351,7 @@ type Project = {
   num: string
   name: string
   tagline: string // one-line summary shown in the collapsed row
+  status?: string // tiny mono badge in the row (e.g. LIVE) — gold, instrument-panel style
   description: string
   stack: string[]
   features: string[]
@@ -1408,12 +1409,20 @@ const PROJECTS: Project[] = [
   },
   {
     num: '04',
-    name: 'Achron',
-    tagline: 'Productivity platform — coming soon',
-    description: '[PLACEHOLDER — productivity platform; user will provide]',
-    stack: ['[PLACEHOLDER]'],
-    features: ['[PLACEHOLDER — user will provide]'],
-    href: '#',
+    name: 'Archon',
+    tagline: 'Gamified productivity & identity engine',
+    status: 'LIVE',
+    description:
+      'A gamified productivity OS — notes, whiteboards, a VS Code sandbox, and deep-work timers fused into one Identity Engine that turns daily consistency into XP, levels, and live analytics.',
+    stack: ['Next.js 16', 'TypeScript', 'PostgreSQL', 'Prisma 7', 'Python FastAPI', 'Gemini'],
+    features: [
+      'Identity Engine — sessions, problems, and tasks stream into XP + an 11-tier progression (Initiate → Legend)',
+      'Universal ⌘K semantic search across 9 entity types — hand-rolled vector layer, no external DB',
+      'Block editor + infinite whiteboards + physics-based knowledge graph',
+      'Monaco (VS Code) sandbox with live Codeforces rating sync',
+      'Polyglot core — Next.js 16 on Vercel + Python FastAPI analytics on Railway',
+    ],
+    href: 'https://achron.vercel.app',
     video: '/Achron.mp4',
   },
 ]
@@ -1441,28 +1450,38 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
         type="button"
         onClick={onOpen}
         aria-expanded={active}
-        className="pointer-events-auto flex w-full items-center gap-5 py-[2.5vh] text-left"
+        className="group pointer-events-auto flex w-full items-center gap-5 py-[2.5vh] text-left"
       >
         <span
-          className={`w-8 shrink-0 font-mono text-[0.82rem] font-semibold tabular-nums transition-colors duration-500 ${active ? 'text-workgold' : 'text-[#9a9488]'}`}
+          className={`w-8 shrink-0 font-mono text-[0.82rem] font-semibold tabular-nums transition-colors duration-500 ${active ? 'text-workgold' : 'text-[#9a9488] group-hover:text-workgold'}`}
         >
           {project.num}
         </span>
         <h3
-          className="shrink-0 font-grotesk font-semibold leading-none tracking-[-0.02em] text-sumi transition-[font-size] duration-500"
+          className="shrink-0 font-grotesk font-semibold leading-none tracking-[-0.02em] text-sumi transition-[font-size,transform] duration-500 group-hover:translate-x-1"
           style={{ fontSize: active ? 'clamp(2rem,4.4vw,3.25rem)' : '1.6rem', transitionTimingFunction: ACC_EASE }}
         >
           {project.name}
         </h3>
+        {project.status && (
+          <span
+            className={`shrink-0 rounded-full border border-workgold/45 px-2.5 py-0.5 font-mono text-[0.56rem] font-semibold tracking-[0.2em] text-workgold transition-opacity duration-300 ${active ? 'opacity-0' : 'opacity-100'}`}
+          >
+            {project.status}
+          </span>
+        )}
         <span
-          className={`flex-1 truncate text-[0.92rem] text-[#8a8478] transition-opacity duration-300 ${active ? 'opacity-0' : 'opacity-100'}`}
+          className={`flex-1 truncate text-[0.92rem] text-[#8a8478] transition-colors duration-300 group-hover:text-[#5a564c] ${active ? 'opacity-0' : 'opacity-100'}`}
         >
           {project.tagline}
         </span>
         <span
           className={`shrink-0 font-mono text-[0.78rem] font-semibold text-workgold transition-opacity duration-300 ${active ? 'opacity-0' : 'opacity-100'}`}
         >
-          View →
+          View{' '}
+          <span aria-hidden className="inline-block transition-transform duration-300 group-hover:translate-x-1">
+            →
+          </span>
         </span>
       </button>
 
@@ -1479,7 +1498,10 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
                 {project.description}
               </p>
 
-              <div className="mt-4 flex flex-wrap gap-2">
+              <div className="mb-2 mt-4 font-mono text-[0.6rem] font-medium tracking-[0.22em] text-workgold">
+                STACK
+              </div>
+              <div className="flex flex-wrap gap-2">
                 {project.stack.map((t) => (
                   <span
                     key={t}
@@ -1506,9 +1528,14 @@ function ProjectRow({ project, active, onOpen }: { project: Project; active: boo
 
               <a
                 href={project.href}
-                className="pointer-events-auto mt-5 inline-flex w-fit items-center gap-2 rounded-full bg-sumi px-5 py-2.5 font-hanken text-[0.82rem] font-semibold text-paper transition-transform hover:-translate-y-0.5"
+                target={project.href.startsWith('http') ? '_blank' : undefined}
+                rel={project.href.startsWith('http') ? 'noreferrer' : undefined}
+                className="group/demo pointer-events-auto mt-5 inline-flex w-fit items-center gap-2 rounded-full bg-sumi px-5 py-2.5 font-hanken text-[0.82rem] font-semibold text-paper transition-transform hover:-translate-y-0.5"
               >
-                Live demo <span aria-hidden>→</span>
+                Live demo{' '}
+                <span aria-hidden className="inline-block transition-transform duration-300 group-hover/demo:translate-x-1">
+                  →
+                </span>
               </a>
             </div>
 
@@ -1841,6 +1868,8 @@ export default function App() {
   const hudRef = useRef<HTMLDivElement>(null) // tagline / nav / corners
   const pctRef = useRef<HTMLSpanElement>(null)
   const progressFillRef = useRef<HTMLSpanElement>(null) // live scroll rail fill
+  const instrumentRef = useRef<HTMLDivElement>(null) // persistent panel — theme-aware ink
+  const railTrackRef = useRef<HTMLSpanElement>(null) // scroll rail track — theme-aware
 
   // ABOUT overlay refs (STAGE 1) — fade/scale in place, driven below.
   const concentrateRef = useRef<HTMLDivElement>(null)
@@ -1877,8 +1906,12 @@ export default function App() {
       if (backdropRef.current) backdropRef.current.style.transform = rise
       if (nameLayerRef.current) nameLayerRef.current.style.transform = rise
       if (hudRef.current) hudRef.current.style.transform = rise
-      if (pctRef.current) pctRef.current.textContent = `${Math.round(clamp01(p) * 100)}`.padStart(3, '0')
-      if (progressFillRef.current) progressFillRef.current.style.height = `${clamp01(p) * 100}%`
+      // Scroll readout tracks the WHOLE page (hero → contact), not just the katana arc —
+      // read straight off the scroller so 100% means the actual end of the site.
+      const scrollEl = scrollerRef.current
+      const rawAll = scrollEl ? scrollEl.scrollTop / (scrollEl.scrollHeight - scrollEl.clientHeight || 1) : 0
+      if (pctRef.current) pctRef.current.textContent = `${Math.round(clamp01(rawAll) * 100)}`.padStart(3, '0')
+      if (progressFillRef.current) progressFillRef.current.style.height = `${clamp01(rawAll) * 100}%`
 
       // ONE blur-to-sharp focus-pull — shared by EVERY About-section text (cues, title,
       // beats) so the whole section speaks one animation language. Weighted smootherstep
@@ -1945,6 +1978,14 @@ export default function App() {
       if (barDarkRef.current) barDarkRef.current.style.opacity = `${1 - lit}`
       if (barLightRef.current) barLightRef.current.style.opacity = `${lit * (1 - nightIn)}`
       if (barContactRef.current) barContactRef.current.style.opacity = `${lit * nightIn}`
+
+      // Instrument panel ink follows the section theme (washi on dark, sumi on cream) so
+      // the scroll rail stays visible over the light projects section too.
+      const panelLight = lit * (1 - nightIn) > 0.5
+      if (instrumentRef.current)
+        instrumentRef.current.style.color = panelLight ? 'rgba(28,26,22,0.5)' : 'rgba(236,232,225,0.25)'
+      if (railTrackRef.current)
+        railTrackRef.current.style.backgroundColor = panelLight ? 'rgba(28,26,22,0.16)' : 'rgba(236,232,225,0.12)'
 
       raf = requestAnimationFrame(tick)
     }
@@ -2112,9 +2153,14 @@ export default function App() {
       </div>
 
       {/* Persistent instrument panel — quiet margin detail, FIXED, never scrolls, so the
-          corners always carry low-contrast detail instead of bare black. Same monospace
-          language as the hero corners: section label, faint vertical kanji, live scroll rail. */}
-      <div className="fixed inset-0 z-[15] pointer-events-none font-mono text-washi/25 select-none">
+          corners always carry low-contrast detail instead of bare black. THEME-AWARE: its
+          ink swaps washi ↔ sumi (driven by the tick) so it stays visible on the cream
+          projects section as well as the dark hero/contact. */}
+      <div
+        ref={instrumentRef}
+        className="fixed inset-0 z-[15] pointer-events-none font-mono select-none transition-colors duration-500"
+        style={{ color: 'rgba(236,232,225,0.25)' }}
+      >
         {/* left edge — section label + faint vertical kanji column */}
         <div className="absolute left-[1.6vw] top-1/2 -translate-y-1/2 flex items-center gap-4 [writing-mode:vertical-rl] rotate-180">
           <span className="text-[0.6rem] tracking-[0.5em] uppercase">Sec.01 — Forge</span>
@@ -2123,7 +2169,11 @@ export default function App() {
         {/* right edge — live scroll-progress rail + numeric readout */}
         <div className="absolute right-[1.7vw] top-1/2 -translate-y-1/2 flex flex-col items-center gap-3">
           <span className="text-[0.55rem] tracking-[0.4em] uppercase [writing-mode:vertical-rl]">Scroll</span>
-          <span className="relative block w-px h-28 bg-washi/12 overflow-hidden">
+          <span
+            ref={railTrackRef}
+            className="relative block w-px h-28 overflow-hidden transition-colors duration-500"
+            style={{ backgroundColor: 'rgba(236,232,225,0.12)' }}
+          >
             <span ref={progressFillRef} className="absolute inset-x-0 top-0 bg-gold/45" style={{ height: '0%' }} />
           </span>
           <span className="text-[0.58rem] tracking-[0.15em] tabular-nums">

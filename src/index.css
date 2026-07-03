@@ -36,4 +36,12 @@
     display: block;
     touch-action: none;
   }
+  /* Hide the native scrollbar (the ScrollControls scroller's overlay bar that pops in
+     while scrolling) — the site carries its own instrument-panel scroll rail. */
+  * {
+    scrollbar-width: none;
+  }
+  *::-webkit-scrollbar {
+    display: none;
+  }
 }
