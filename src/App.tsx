@@ -184,11 +184,25 @@ const HERO_PAGES = 8 // hero + about + transition (unchanged feel)
 // budget of its own — 1 page leaves a small post-landing buffer. NB: the katana arc keeps
 // EXACTLY (HERO_PAGES-1) pages of physical scroll regardless of this value, so the
 // hero/about/transition feel is pixel-identical.
-const STACK_PAGES = 1 // tiny tail after the section lands (was a 5-page sticky stack)
-// STAGE 3 — CONTACT: appended scroll for the closing frame (projects → dark → katana rest).
+// Projects is a CLICK accordion — it needs NO scroll of its own, so no stack pages:
+// the moment you scroll past the landing, the contact transition begins (no dead scroll).
+const STACK_PAGES = 0
+// STAGE 3 — CONTACT: appended scroll for the closing frame (projects → night → blade display).
 const CONTACT_PAGES = 2
 const TOTAL_PAGES = HERO_PAGES + STACK_PAGES + CONTACT_PAGES
 const KATANA_SCROLL = (HERO_PAGES - 1) / (TOTAL_PAGES - 1)
+
+// Map a katana-arc progress p to its RAW page-scroll fraction (inverse of remapScroll,
+// scaled into the katana arc's share) — used by the nav to jump to sections.
+const pToRaw = (p: number) =>
+  (p <= SETTLE_END
+    ? (p / SETTLE_END) * SCROLL_SPLIT
+    : SCROLL_SPLIT + ((p - SETTLE_END) / (1 - SETTLE_END)) * (1 - SCROLL_SPLIT)) * KATANA_SCROLL
+
+// Nav targets as raw scroll fractions. About lands where the "About" title is fully
+// resolved; Projects at the landed accordion; Contact at the full close.
+const NAV_RAW = { top: 0, about: pToRaw(0.395), projects: KATANA_SCROLL, contact: 1 } as const
+type NavTarget = keyof typeof NAV_RAW
 
 /* ---- STAGE 3: CONTACT — the bare blade, displayed --------------------------------
  * The closing frame, on its OWN dark tone (--color-night, a midnight indigo that
@@ -200,19 +214,20 @@ const KATANA_SCROLL = (HERO_PAGES - 1) / (TOTAL_PAGES - 1)
  * simply fades in already displayed, spinning. The RIGHT half is the full contact
  * stack (email · socials · form). All windows below live in q — the damped stack
  * progress spanning the appended pages (raw KATANA_SCROLL → 1) — so contact
- * choreography never touches the katana arc. q 0 → ~0.3 is a buffer page where the
- * projects accordion stays interactive. */
-const C_CLEAR = { in: 0.3, out: 0.44 } // projects rows clear off the cream
-const C_NIGHT = { in: 0.34, out: 0.56 } // night layer + hexagon crossfade over the cream
+ * choreography never touches the katana arc. Windows start almost immediately — the
+ * projects accordion is click-driven, so any scroll past the landing IS the exit
+ * (no dead buffer scroll). */
+const C_CLEAR = { in: 0.06, out: 0.2 } // projects rows clear off the cream
+const C_NIGHT = { in: 0.1, out: 0.34 } // night layer + hexagon crossfade over the cream
 // NO glitch, NO travel: while the blade is still invisible, camera/pose/draw SNAP to
 // the final display state (C_SNAP), then the blade plain-fades in ALREADY in place
 // over the hexagon (C_FADE). The pixel-dissolve is never reversed here.
-const C_SNAP = 0.5 // snap point — everything invisible flips to the display state
-const C_FADE = { in: 0.54, out: 0.7 } // plain opacity fade-in of the displayed blade
-const C_HEAD = { in: 0.58, out: 0.72 } // eyebrow + "Contact" focus-pull
-const C_BODY = { in: 0.64, out: 0.8 } // email / socials / form
-const C_FOOT = { in: 0.72, out: 0.88 } // corners + footer line
-const C_PETAL = { amt: 0.12, in: 0.55, out: 0.8 } // sparse petal drift over the close
+const C_SNAP = 0.3 // snap point — everything invisible flips to the display state
+const C_FADE = { in: 0.34, out: 0.52 } // plain opacity fade-in of the displayed blade
+const C_HEAD = { in: 0.42, out: 0.58 } // eyebrow + "Contact" focus-pull
+const C_BODY = { in: 0.5, out: 0.68 } // email / socials / form
+const C_FOOT = { in: 0.62, out: 0.82 } // corners + footer line
+const C_PETAL = { amt: 0.12, in: 0.36, out: 0.62 } // sparse petal drift over the close
 // Final display framing: pull back and aim RIGHT of the blade so it sits over the
 // left-side hexagon artwork, sized to fit inside it.
 const CONTACT_OFF = new THREE.Vector3(0, 0, 9.0)
@@ -944,6 +959,7 @@ type DriveProps = {
   axesRef: React.MutableRefObject<Axes | null>
   progressRef: React.MutableRefObject<number>
   stackProgressRef?: React.MutableRefObject<number> // only Scene/Progress use it
+  scrollerRef?: React.MutableRefObject<HTMLElement | null> // exposes the ScrollControls scroller to the nav
 }
 
 // Runs FIRST each frame: damps the one shared progress `p` toward the RAW scroll
@@ -952,11 +968,16 @@ type DriveProps = {
 function Progress({
   progressRef,
   stackProgressRef,
+  scrollerRef,
 }: {
   progressRef: React.MutableRefObject<number>
   stackProgressRef: React.MutableRefObject<number>
+  scrollerRef?: React.MutableRefObject<HTMLElement | null>
 }) {
   const data = useScroll()
+  useEffect(() => {
+    if (scrollerRef) scrollerRef.current = data.el
+  }, [data.el, scrollerRef])
   useFrame((_, dt) => {
     const el = data.el
     const raw = el ? el.scrollTop / (el.scrollHeight - el.clientHeight || 1) : 0
@@ -971,12 +992,12 @@ function Progress({
   return null
 }
 
-function Scene({ axesRef, progressRef, stackProgressRef }: DriveProps) {
+function Scene({ axesRef, progressRef, stackProgressRef, scrollerRef }: DriveProps) {
   return (
     <>
       {/* Two smoothed progress values (katana arc + projects stack) — updated before
           Katana & Rig read them. */}
-      <Progress progressRef={progressRef} stackProgressRef={stackProgressRef!} />
+      <Progress progressRef={progressRef} stackProgressRef={stackProgressRef!} scrollerRef={scrollerRef} />
 
       {/* Key light: hard, raking, defines the blade's edge. */}
       <directionalLight position={[4, 6, 5]} intensity={2.4} color="#fff6ea" />
@@ -1752,23 +1773,44 @@ function ContactSection({ nightRef, layerRef, headRef, bodyRef, footRef }: Conta
 
 /* One copy of the sticky top bar in a given theme. Three are stacked + crossfaded so the
  * bar reads on the dark hero/about, the cream projects section, AND the dark contact
- * close — each copy highlighting its own section's pill. */
-function TopBarInner({ tone, active }: { tone: 'dark' | 'light'; active: 'about' | 'projects' | 'contact' }) {
+ * close — each copy highlighting its own section's pill. Pills navigate: they TELEPORT
+ * the scroller to their section (all copies share the handler, so whichever copy is on
+ * top catches the click). */
+function TopBarInner({
+  tone,
+  active,
+  onNav,
+}: {
+  tone: 'dark' | 'light'
+  active: 'about' | 'projects' | 'contact'
+  onNav: (target: NavTarget) => void
+}) {
   const dark = tone === 'dark'
   const grad = dark ? 'from-ink/70 via-ink/25' : 'from-paper/80 via-paper/30'
   const mark = dark ? 'text-gold' : 'text-workgold'
   const idle = dark ? 'border-washi/15 text-washi/70' : 'border-sumi/15 text-sumi/70'
   const hot = dark ? 'border-gold/50 text-gold' : 'border-workgold/60 text-workgold'
-  const pill = (name: typeof active) => `${PILL} ${active === name ? hot : idle}`
+  const pill = (name: typeof active) => `${PILL} cursor-pointer ${active === name ? hot : idle}`
   return (
     <div className={`bg-linear-to-b ${grad} to-transparent`}>
       <div className="flex items-center justify-between px-6 md:px-10 h-16 md:h-20">
-        <span className={`text-2xl leading-none ${mark} pointer-events-auto select-none`}>鍛</span>
+        <button
+          type="button"
+          onClick={() => onNav('top')}
+          className={`text-2xl leading-none ${mark} pointer-events-auto select-none cursor-pointer`}
+        >
+          鍛
+        </button>
         <nav className="flex gap-1.5 pointer-events-auto">
-          <span className={pill('about')}>About</span>
-          <span className={pill('projects')}>Projects</span>
-          <span className={`${PILL} ${idle}`}>CP</span>
-          <span className={pill('contact')}>Contact</span>
+          <button type="button" onClick={() => onNav('about')} className={pill('about')}>
+            About
+          </button>
+          <button type="button" onClick={() => onNav('projects')} className={pill('projects')}>
+            Projects
+          </button>
+          <button type="button" onClick={() => onNav('contact')} className={pill('contact')}>
+            Contact
+          </button>
         </nav>
       </div>
     </div>
@@ -1779,6 +1821,20 @@ export default function App() {
   const axesRef = useRef<Axes | null>(null)
   const progressRef = useRef(0)
   const stackProgressRef = useRef(0) // damped projects scroll-stack progress (q)
+  const scrollerRef = useRef<HTMLElement | null>(null) // ScrollControls scroller (set by Progress)
+
+  // NAV: TELEPORT to a section — snap the scroller to its raw fraction AND snap the two
+  // damped progress values to the exact state that fraction maps to, so the section
+  // appears instantly with no scroll-through / catch-up animation. Mirrors the damping
+  // math in <Progress/> (its next frame then damps from an already-correct value ⇒ no move).
+  const navTo = (target: NavTarget) => {
+    const el = scrollerRef.current
+    if (!el) return
+    const raw = NAV_RAW[target]
+    el.scrollTop = raw * (el.scrollHeight - el.clientHeight)
+    progressRef.current = clamp01(remapScroll(clamp01(raw / KATANA_SCROLL)))
+    stackProgressRef.current = clamp01((raw - KATANA_SCROLL) / (1 - KATANA_SCROLL))
+  }
 
   const backdropRef = useRef<HTMLDivElement>(null) // sakura layer
   const nameLayerRef = useRef<HTMLDivElement>(null) // wordmark layer
@@ -1878,7 +1934,7 @@ export default function App() {
       // Same interactivity gate as the projects rows: the z-45 layer only exists once
       // the contact zone is actually on screen.
       if (contactLayerRef.current)
-        contactLayerRef.current.style.visibility = q > 0.55 ? 'visible' : 'hidden'
+        contactLayerRef.current.style.visibility = q > 0.38 ? 'visible' : 'hidden'
 
       // Top bar theme: dark (hero/about) → light (projects) → dark again with the
       // Contact pill hot (night contact) — copies crossfaded per section. The light
@@ -1942,7 +1998,12 @@ export default function App() {
         >
           <Suspense fallback={null}>
             <ScrollControls pages={TOTAL_PAGES}>
-              <Scene axesRef={axesRef} progressRef={progressRef} stackProgressRef={stackProgressRef} />
+              <Scene
+                axesRef={axesRef}
+                progressRef={progressRef}
+                stackProgressRef={stackProgressRef}
+                scrollerRef={scrollerRef}
+              />
             </ScrollControls>
           </Suspense>
         </Canvas>
@@ -2077,13 +2138,13 @@ export default function App() {
           either theme. The wordmark + tagline live in the hero and scroll away. */}
       <header className="fixed top-0 inset-x-0 z-50 pointer-events-none">
         <div ref={barDarkRef} className="absolute inset-x-0 top-0">
-          <TopBarInner tone="dark" active="about" />
+          <TopBarInner tone="dark" active="about" onNav={navTo} />
         </div>
         <div ref={barLightRef} className="absolute inset-x-0 top-0" style={{ opacity: 0 }}>
-          <TopBarInner tone="light" active="projects" />
+          <TopBarInner tone="light" active="projects" onNav={navTo} />
         </div>
         <div ref={barContactRef} className="absolute inset-x-0 top-0" style={{ opacity: 0 }}>
-          <TopBarInner tone="dark" active="contact" />
+          <TopBarInner tone="dark" active="contact" onNav={navTo} />
         </div>
       </header>
 
