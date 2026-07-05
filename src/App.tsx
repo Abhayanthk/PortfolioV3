@@ -139,6 +139,10 @@ const PETAL_PRESENCE = { hero: 0.16, about: 0.3, in: 0.16, out: 0.5 }
 // the frame (the "wind of flowers"), gone again by the glitch-out. `speed` is the base
 // horizontal drift (units/s); gusts modulate it ±35% on two slow sine bands.
 const PETAL_WIND = { presence: 0.42, speed: 1.5, in: 0.94, out: 0.97 }
+// Over the landscape the field is tinted toward true sakura pink (the pale washi mix
+// used elsewhere would read white against the purple mountains).
+const PETAL_WIND_TINT = new THREE.Color('#f291b4')
+const PETAL_WHITE = new THREE.Color('#ffffff')
 const PETAL_RANK_BAND = 0.18 // soft window each petal fades in/out across
 const PETAL_RIM = '#d9b25a' // faint gold edge-light, tying petals to the sword's gold
 
@@ -921,6 +925,9 @@ function PetalField({
       PETAL_WIND.presence * windAmt +
       C_PETAL.amt * smoothstep(C_PETAL.in, C_PETAL.out, cq)
     material.opacity = PETAL_MAX_OPACITY * presence
+    // WIND window only: deepen the whole field toward true sakura pink (multiplies the
+    // per-instance pinks, so variation survives); back to neutral everywhere else.
+    material.color.lerpColors(PETAL_WHITE, PETAL_WIND_TINT, windAmt)
 
     const t = state.clock.elapsedTime
     const span = PETAL_FIELD_H * 2
