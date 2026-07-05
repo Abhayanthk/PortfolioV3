@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Environment, Loader, ScrollControls, useAnimations, useGLTF, useScroll, useTexture } from '@react-three/drei'
+import { Environment, ScrollControls, useAnimations, useGLTF, useProgress, useScroll, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 
 /* ============================================================================
@@ -1907,6 +1907,70 @@ function TopBarInner({
   )
 }
 
+/* Loading overlay — the forge mark 鍛 (same glyph as the monogram + Sec.01 label)
+ * fills with gold from the base up as assets load, like a blade being tempered.
+ * Hairline rule + tabular readout mirror the instrument panel's scroll rail, so the
+ * loader reads as the same instrument the rest of the site uses. Fades and lifts
+ * away once the scene is ready, then unmounts. */
+function ForgeLoader() {
+  const { active, progress } = useProgress()
+  const [leaving, setLeaving] = useState(false) // fade started
+  const [gone, setGone] = useState(false) // unmounted after the fade
+
+  useEffect(() => {
+    if (active) return
+    // Small hold so the fill visibly lands on 100 before the lift-away.
+    const fade = setTimeout(() => setLeaving(true), 350)
+    const unmount = setTimeout(() => setGone(true), 350 + 800)
+    return () => {
+      clearTimeout(fade)
+      clearTimeout(unmount)
+    }
+  }, [active])
+
+  if (gone) return null
+  const pct = Math.min(100, Math.round(progress))
+  return (
+    <div
+      className={`fixed inset-0 z-[70] flex flex-col items-center justify-center gap-7 bg-ink select-none transition-opacity duration-700 ease-out ${
+        leaving ? 'opacity-0 pointer-events-none' : 'opacity-100'
+      }`}
+    >
+      {/* 鍛 — dim base glyph with a gold copy clipped to the loaded fraction (fills upward) */}
+      <span
+        className={`relative block text-[clamp(5.5rem,16vh,9rem)] leading-none transition-transform duration-700 ease-out ${
+          leaving ? 'scale-105' : 'scale-100'
+        }`}
+      >
+        <span className="text-washi/10">鍛</span>
+        <span
+          aria-hidden
+          className="absolute inset-0 text-gold"
+          style={{
+            clipPath: `inset(${100 - pct}% 0 0 0)`,
+            transition: 'clip-path 500ms cubic-bezier(0.22, 1, 0.36, 1)',
+          }}
+        >
+          鍛
+        </span>
+      </span>
+
+      {/* hairline progress rule — horizontal twin of the right-edge scroll rail */}
+      <span className="relative block h-px w-44 overflow-hidden bg-washi/12">
+        <span
+          className="absolute inset-y-0 left-0 bg-gold/70"
+          style={{ width: `${pct}%`, transition: 'width 500ms cubic-bezier(0.22, 1, 0.36, 1)' }}
+        />
+      </span>
+
+      {/* readout — instrument-panel voice: mono, wide tracking, zero-padded tabular % */}
+      <span className="font-mono text-[0.6rem] tracking-[0.5em] uppercase text-washi/40">
+        Forging&nbsp;&nbsp;<span className="tabular-nums tracking-[0.15em] text-gold/80">{String(pct).padStart(3, '0')}%</span>
+      </span>
+    </div>
+  )
+}
+
 export default function App() {
   const axesRef = useRef<Axes | null>(null)
   const progressRef = useRef(0)
@@ -2281,17 +2345,7 @@ export default function App() {
       </header>
 
       {/* Loading state (DOM overlay, fades out when the model is ready). */}
-      <Loader
-        containerStyles={{ background: '#0a0a0a' }}
-        barStyles={{ background: '#c8a24a', height: '2px' }}
-        dataStyles={{
-          color: '#8a8a8a',
-          fontSize: '11px',
-          letterSpacing: '0.3em',
-          fontFamily: 'ui-monospace, monospace',
-        }}
-        dataInterpolation={(v) => `LOADING ${v.toFixed(0)}%`}
-      />
+      <ForgeLoader />
     </>
   )
 }
