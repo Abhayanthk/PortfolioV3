@@ -700,8 +700,34 @@ function Katana({ axesRef, progressRef, stackProgressRef }: DriveProps) {
  *  damped like a slow film dolly.
  * ========================================================================== */
 
+/* Shared normalized pointer ([-1,1], +y up) — ONE window listener feeding every
+ * mouse-reactive layer (landscape pan + camera drift), so all layers read the exact
+ * same signal. Refcounted: listener detaches when the last consumer unmounts. */
+const POINTER_NDC = new THREE.Vector2(0, 0)
+let pointerNDCUsers = 0
+const onPointerNDCMove = (e: PointerEvent) =>
+  POINTER_NDC.set((e.clientX / window.innerWidth) * 2 - 1, 1 - (e.clientY / window.innerHeight) * 2)
+function usePointerNDC() {
+  useEffect(() => {
+    if (pointerNDCUsers++ === 0) window.addEventListener('pointermove', onPointerNDCMove)
+    return () => {
+      if (--pointerNDCUsers === 0) window.removeEventListener('pointermove', onPointerNDCMove)
+    }
+  }, [])
+  return POINTER_NDC
+}
+
+// Mouse drift — the camera glides a hair TOWARD the pointer (pure camera-space
+// translation, orientation untouched), so the katana appears to slip the opposite
+// way: the same direction the landscape pan moves its image, just a touch stronger.
+// Near layer over far layer of one parallax stack — never fighting it. Damping rate
+// matches the landscape pan exactly so both layers settle in lockstep.
+const MOUSE_DRIFT = { x: 0.02, y: 0.012, damp: 6 } // x/y as fractions of camera distance
+
 function Rig({ axesRef, progressRef, stackProgressRef }: DriveProps) {
   const { camera } = useThree()
+  const pointer = usePointerNDC()
+  const drift = useMemo(() => new THREE.Vector2(), [])
 
   const focus = useMemo(() => new THREE.Vector3(), [])
   const aim = useMemo(() => new THREE.Vector3(), [])
@@ -714,7 +740,7 @@ function Rig({ axesRef, progressRef, stackProgressRef }: DriveProps) {
   const drawW = useMemo(() => new THREE.Vector3(), [])
   const off = useMemo(() => new THREE.Vector3(), [])
 
-  useFrame(() => {
+  useFrame((_, dt) => {
     const axes = axesRef.current
     if (!axes) return
     const p = progressRef.current // same smoothed progress as the blade/scabbard
@@ -776,6 +802,13 @@ function Rig({ axesRef, progressRef, stackProgressRef }: DriveProps) {
     off.lerp(CONTACT_OFF, cAmt)
     camera.position.copy(aim).add(off)
     camera.lookAt(aim)
+
+    // MOUSE DRIFT — applied last, in camera space, scaled by the live camera distance
+    // so the on-screen amount stays constant through every zoom stage.
+    drift.lerp(pointer, 1 - Math.exp(-MOUSE_DRIFT.damp * dt)) // frame-rate-independent ease
+    const dist = off.length()
+    camera.translateX(drift.x * dist * MOUSE_DRIFT.x)
+    camera.translateY(drift.y * dist * MOUSE_DRIFT.y)
   })
 
   return null
@@ -1264,16 +1297,11 @@ function LandscapeQuad({ progressRef }: { progressRef: React.MutableRefObject<nu
     [tex, labelTex]
   )
 
-  // Mouse position in [-1,1] (left/bottom = -1) — drives the pan toward the cropped edges.
-  const mouse = useMemo(() => new THREE.Vector2(0, 0), [])
+  // Shared pointer in [-1,1] (left/bottom = -1) — drives the pan toward the cropped
+  // edges; same signal + damping rate as the camera's mouse drift, so both layers move
+  // as one parallax stack.
+  const mouse = usePointerNDC()
   const panTarget = useMemo(() => new THREE.Vector2(0, 0), [])
-  useEffect(() => {
-    const onMove = (e: PointerEvent) => {
-      mouse.set((e.clientX / window.innerWidth) * 2 - 1, 1 - (e.clientY / window.innerHeight) * 2)
-    }
-    window.addEventListener('pointermove', onMove)
-    return () => window.removeEventListener('pointermove', onMove)
-  }, [mouse])
 
   useFrame((state, dt) => {
     const p = progressRef.current
@@ -1427,6 +1455,7 @@ const PROJECTS: Project[] = [
     num: '01',
     name: 'Retain AI',
     tagline: 'Multi-agent churn-retention engine',
+    status: 'LIVE',
     description:
       'A multi-agent retention engine that predicts churn and orchestrates win-back campaigns — an 18-node LangGraph pipeline running at zero inference cost.',
     stack: ['Python', 'LangGraph', 'ChromaDB', 'FastAPI', 'Gemini Flash', 'Groq'],
@@ -1437,12 +1466,13 @@ const PROJECTS: Project[] = [
       'Signal-aware RAG over ChromaDB',
       '$0 inference cost via intelligent Gemini Flash / Groq routing',
     ],
-    href: '#',
+    href: 'https://retain-ai-ten.vercel.app/',
   },
   {
     num: '02',
     name: 'Nextflow',
     tagline: 'Visual node-based AI workflow builder',
+    status: 'LIVE',
     description:
       'A visual, node-based AI workflow builder with a custom DAG execution engine — wire nodes together and run distributed, durable workflows.',
     stack: ['Next.js', 'TypeScript', 'React Flow', 'Trigger.dev', 'PostgreSQL', 'Redis'],
@@ -1453,12 +1483,13 @@ const PROJECTS: Project[] = [
       'Partial re-execution caching — only re-runs changed nodes',
       'Distributed state management across the graph',
     ],
-    href: '#',
+    href: 'https://nextflow-kohl.vercel.app/',
   },
   {
     num: '03',
     name: 'Orbyt',
     tagline: 'OpenAI-compatible multi-provider LLM gateway',
+    status: 'LIVE',
     description:
       'An OpenAI-compatible LLM gateway that unifies multiple providers behind one API, with Redis-backed key orchestration and a pluggable adapter layer.',
     stack: ['TypeScript', 'Node.js', 'Redis', 'PostgreSQL'],
@@ -1468,7 +1499,7 @@ const PROJECTS: Project[] = [
       'Provider adapter layer built on the open/closed principle (add providers without touching core)',
       'Unified multi-provider routing',
     ],
-    href: '#',
+    href: 'https://openrouter-clone-dashboard.vercel.app/',
   },
   {
     num: '04',
