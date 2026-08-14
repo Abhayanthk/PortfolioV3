@@ -194,11 +194,16 @@ const HERO_PAGES = 8 // hero + about + transition (unchanged feel)
 // hero/about/transition feel is pixel-identical.
 // Projects is a CLICK accordion — it needs NO scroll of its own, so no stack pages:
 // the moment you scroll past the landing, the contact transition begins (no dead scroll).
-const STACK_PAGES = 0
+const STACK_PAGES = 4
 // STAGE 3 — CONTACT: appended scroll for the closing frame (projects → night → blade display).
 const CONTACT_PAGES = 2
 const TOTAL_PAGES = HERO_PAGES + STACK_PAGES + CONTACT_PAGES
 const KATANA_SCROLL = (HERO_PAGES - 1) / (TOTAL_PAGES - 1)
+
+const STACK_FRACTION = STACK_PAGES / (STACK_PAGES + CONTACT_PAGES)
+const CONTACT_FRACTION = CONTACT_PAGES / (STACK_PAGES + CONTACT_PAGES)
+const getContactQ = (q: number) => clamp01((q - STACK_FRACTION) / CONTACT_FRACTION)
+const getProjectQ = (q: number) => clamp01(q / STACK_FRACTION)
 
 // Map a katana-arc progress p to its RAW page-scroll fraction (inverse of remapScroll,
 // scaled into the katana arc's share) — used by the nav to jump to sections.
@@ -457,8 +462,7 @@ float kdHash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.54
 `
 const KDISS_GLSL_BODY = `
   if (uKDissolve > 0.0001) {
-    vec2 kdCell = floor(gl_FragCoord.xy / uBlockPx);
-    if (kdHash(kdCell) < uKDissolve) discard;
+    if (kdHash(gl_FragCoord.xy) < uKDissolve) discard;
   }
 `
 
@@ -623,7 +627,8 @@ function Katana({ axesRef, progressRef, stackProgressRef }: DriveProps) {
     // travel. At C_SNAP — while everything is still fully dissolved/invisible — the
     // draw, pose, and scabbard flip straight to the final display state; the bare
     // blade then plain-fades in via material opacity, already in place, spinning.
-    const cq = stackProgressRef?.current ?? 0
+    const q = stackProgressRef?.current ?? 0
+    const cq = getContactQ(q)
     const cOn = cq > C_SNAP
     const cFade = smoothstep(C_FADE.in, C_FADE.out, cq)
     scabbard.visible = !cOn // hidden for the whole contact display
@@ -776,7 +781,8 @@ function Rig({ axesRef, progressRef, stackProgressRef }: DriveProps) {
     // CONTACT display: SNAPPED framing (no travel) — flips while the blade is still
     // invisible. Aim RIGHT of the BARE blade's own center (the scabbard is hidden
     // there) so the spinning blade sits over the left-side hexagon artwork.
-    const cq = stackProgressRef?.current ?? 0
+    const q = stackProgressRef?.current ?? 0
+    const cq = getContactQ(q)
     const cAmt = cq > C_SNAP ? 1 : 0
     if (cAmt > 0) {
       box.setFromObject(axes.sword)
@@ -946,7 +952,8 @@ function PetalField({
     // EXCEPT the WIND window, where they return sweeping across the landscape hold.
     // CONTACT: a sparse drift returns over the resting blade — nothing else moves.
     const p = progressRef.current
-    const cq = stackProgressRef?.current ?? 0
+    const q = stackProgressRef?.current ?? 0
+    const cq = getContactQ(q)
     const windAmt = plateau(p, PETAL_WIND.in, PETAL_WIND.out, LAND_VANISH.in, LAND_VANISH.out)
     const presence =
       THREE.MathUtils.lerp(
@@ -1188,21 +1195,13 @@ const LAND_FRAG = /* glsl */ `
       col = mix(col, labCol, lab.a * li);
     }
 
-    // PHASE 4 glitch-OUT: each block flips to ONE bg color, then is removed → section.
-    // vanishGate floors out the cells whose hash is ~0: without it those few cells satisfy
-    // step(hash, 0) === 1 while the landscape is still clean, leaving stray frozen blocks
-    // (a cream toBg square + a black gone-hole) parked on screen. Only let toBg/gone act
-    // once the glitch-out is genuinely underway.
+    // PHASE 4 fade-OUT: fade to bg color, then vanish.
     float vanishGate = step(0.0008, uVanish);
-    float toBg = step(lHash(cellId + 5.0), smoothstep(0.0, 0.85, uVanish)) * vanishGate;
-    col = mix(col, uOutColor, toBg);
+    col = mix(col, uOutColor, uVanish);
 
-    // Per-block alpha: appears (in) blockwise, vanishes (out) blockwise.
-    float appear = step(lHash(cellId + 3.0), smoothstep(0.0, 0.55, uReveal));
-    float gone = step(lHash(cellId + 9.0), uVanish) * vanishGate;
-    // Hard gate: the layer is FULLY hidden until the glitch-in actually starts, so no
-    // stray hash==0 blocks leak the image over the hero / about sections.
-    // (NB: do not name this var "active" — that is a reserved word in GLSL.)
+    // Smooth alpha fade
+    float appear = uReveal;
+    float gone = uVanish;
     float gate = step(0.0008, uReveal);
 
     gl_FragColor = vec4(col, appear * (1.0 - gone) * gate);
@@ -1521,8 +1520,7 @@ const PROJECTS: Project[] = [
   },
 ]
 
-// Weighted expand/collapse easing — the same "heavy settle" used across the katana arc.
-const ACC_EASE = 'cubic-bezier(0.16, 1, 0.3, 1)'
+
 
 // The reference's media placeholder: a 135° hatched fill (utilities can't express the
 // repeating-linear-gradient cleanly, so it's an inline style object per house rules).
@@ -1536,135 +1534,87 @@ const STRIPE_FILL: React.CSSProperties = {
  * and clickable; the expanded body (description · stack · key features · media · live demo)
  * is height-animated via the grid-template-rows 0fr↔1fr trick so it expands/collapses on the
  * site's weighted easing without a JS height measure. */
-function ProjectRow({ project, active, onOpen }: { project: Project; active: boolean; onOpen: () => void }) {
+function ProjectSlide({ project }: { project: Project }) {
   return (
-    <div className="border-b border-sumi/12 first:border-t first:border-sumi/12">
-      {/* header row — always visible, the only scroll-blocking hit target is the button */}
-      <button
-        type="button"
-        onClick={onOpen}
-        aria-expanded={active}
-        className="group pointer-events-auto flex w-full items-center gap-5 py-[2.5vh] text-left"
-      >
-        <span
-          className={`w-8 shrink-0 font-mono text-[0.82rem] font-semibold tabular-nums transition-colors duration-500 ${active ? 'text-workgold' : 'text-[#9a9488] group-hover:text-workgold'}`}
-        >
-          {project.num}
-        </span>
-        <h3
-          className="shrink-0 font-grotesk font-semibold leading-none tracking-[-0.02em] text-sumi transition-[font-size,transform] duration-500 group-hover:translate-x-1"
-          style={{ fontSize: active ? 'clamp(2rem,4.4vw,3.25rem)' : '1.6rem', transitionTimingFunction: ACC_EASE }}
-        >
-          {project.name}
-        </h3>
-        {project.status && (
-          <span
-            className={`shrink-0 rounded-full border border-workgold/45 px-2.5 py-0.5 font-mono text-[0.56rem] font-semibold tracking-[0.2em] text-workgold transition-opacity duration-300 ${active ? 'opacity-0' : 'opacity-100'}`}
-          >
-            {project.status}
-          </span>
-        )}
-        <span
-          className={`flex-1 truncate text-[0.92rem] text-[#8a8478] transition-colors duration-300 group-hover:text-[#5a564c] ${active ? 'opacity-0' : 'opacity-100'}`}
-        >
-          {project.tagline}
-        </span>
-        <span
-          className={`shrink-0 font-mono text-[0.78rem] font-semibold text-workgold transition-opacity duration-300 ${active ? 'opacity-0' : 'opacity-100'}`}
-        >
-          View{' '}
-          <span aria-hidden className="inline-block transition-transform duration-300 group-hover:translate-x-1">
-            →
-          </span>
-        </span>
-      </button>
-
-      {/* expanded body — grid-rows trick: 0fr (collapsed) ↔ 1fr (open), always mounted */}
-      <div
-        className="grid transition-[grid-template-rows] duration-700"
-        style={{ gridTemplateRows: active ? '1fr' : '0fr', transitionTimingFunction: ACC_EASE }}
-      >
-        <div className="min-h-0 overflow-hidden">
-          <div className="grid grid-cols-1 gap-7 pb-[2.4vh] pt-0.5 md:grid-cols-[1fr_1.15fr] md:gap-10">
-            {/* left — description · stack chips · key features · live demo */}
-            <div className="flex flex-col">
-              <p className="max-w-[460px] text-[clamp(0.9rem,1.1vw,1.02rem)] leading-[1.55] text-[#48443c]">
-                {project.description}
-              </p>
-
-              <div className="mb-2 mt-4 font-mono text-[0.6rem] font-medium tracking-[0.22em] text-workgold">
-                STACK
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {project.stack.map((t) => (
-                  <span
-                    key={t}
-                    className="rounded-full bg-sumi/5 px-3 py-1.5 font-hanken text-[0.72rem] font-medium text-[#5a564c]"
-                  >
-                    {t}
-                  </span>
-                ))}
-              </div>
-
-              <div className="mt-4 border-t border-sumi/12 pt-3.5">
-                <div className="mb-2 font-mono text-[0.6rem] font-medium tracking-[0.22em] text-workgold">
-                  KEY FEATURES
-                </div>
-                <ul className="grid gap-x-8 gap-y-1 sm:grid-cols-2">
-                  {project.features.map((f) => (
-                    <li key={f} className="flex gap-2 text-[0.78rem] leading-[1.45] text-[#5a564c]">
-                      <span className="shrink-0 text-workgold/70">›</span>
-                      <span>{f}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <a
-                href={project.href}
-                target={project.href.startsWith('http') ? '_blank' : undefined}
-                rel={project.href.startsWith('http') ? 'noreferrer' : undefined}
-                className="group/demo pointer-events-auto mt-5 inline-flex w-fit items-center gap-2 rounded-full bg-sumi px-5 py-2.5 font-hanken text-[0.82rem] font-semibold text-paper transition-transform hover:-translate-y-0.5"
-              >
-                Live demo{' '}
-                <span aria-hidden className="inline-block transition-transform duration-300 group-hover/demo:translate-x-1">
-                  →
+    <div className="h-full shrink-0 flex flex-col justify-center pb-[6vh]" style={{ width: `${100 / PROJECTS.length}%` }}>
+      <div className="w-full max-w-6xl">
+        <div className="grid grid-cols-1 gap-8 md:grid-cols-[1fr_1.15fr] md:gap-12">
+          {/* left — description · stack chips · key features · live demo */}
+          <div className="flex flex-col">
+            <div className="mb-6 flex items-baseline gap-4">
+              <span className="font-mono text-sm font-semibold tabular-nums text-workgold">
+                {project.num}
+              </span>
+              <h3 className="font-grotesk text-3xl md:text-5xl font-semibold leading-none tracking-[-0.02em] text-sumi">
+                {project.name}
+              </h3>
+              {project.status && (
+                <span className="rounded-full border border-workgold/45 px-2.5 py-0.5 font-mono text-[0.56rem] font-semibold tracking-[0.2em] text-workgold">
+                  {project.status}
                 </span>
-              </a>
-            </div>
-
-            {/* right — demo media. A real looping clip when `project.video` is set;
-                otherwise the striped "demo reel" placeholder (reference styling). */}
-            <div className="relative aspect-[4/3] overflow-hidden rounded-[14px] bg-[#e7e2d6] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.06)] md:aspect-auto md:h-[33vh]">
-              {project.video ? (
-                <video
-                  className="absolute inset-0 h-full w-full object-cover"
-                  src={project.video}
-                  autoPlay
-                  muted
-                  loop
-                  playsInline
-                />
-              ) : (
-                <>
-                  <div className="absolute inset-0" style={STRIPE_FILL} />
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3.5">
-                    <span className="grid h-[62px] w-[62px] place-items-center rounded-full bg-sumi">
-                      <span className="ml-[3px] block h-0 w-0 border-y-[9px] border-l-[15px] border-y-transparent border-l-paper" />
-                    </span>
-                    <span className="rounded-md bg-paper/80 px-2.5 py-1 font-mono text-[0.62rem] tracking-[0.2em] text-[#8a8276]">
-                      {project.num} — DEMO REEL
-                    </span>
-                  </div>
-                </>
               )}
             </div>
+
+            <p className="max-w-[460px] text-[clamp(1rem,1.2vw,1.1rem)] leading-[1.6] text-[#48443c]">
+              {project.description}
+            </p>
+
+            <div className="mb-2 mt-8 font-mono text-[0.65rem] font-medium tracking-[0.22em] text-workgold">
+              STACK
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {project.stack.map((t) => (
+                <span
+                  key={t}
+                  className="rounded-md bg-sumi/5 px-2.5 py-1 font-mono text-[0.7rem] text-sumi/80"
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+
+            <div className="mb-2 mt-8 font-mono text-[0.65rem] font-medium tracking-[0.22em] text-workgold">
+              KEY FEATURES
+            </div>
+            <ul className="flex flex-col gap-2.5 border-l border-workgold/30 pl-4 max-w-[460px]">
+              {project.features.map((f) => (
+                <li key={f} className="text-[0.88rem] leading-[1.45] text-[#5a564c]">
+                  <span className="text-workgold mr-1.5 inline-block -translate-y-0.5 font-sans">›</span>
+                  {f}
+                </li>
+              ))}
+            </ul>
+
+            <a
+              href={project.href}
+              className="group pointer-events-auto mt-10 inline-flex w-fit items-center gap-2 rounded-full bg-[#524d42] px-6 py-2.5 font-hanken text-[0.85rem] font-medium tracking-[0.02em] text-washi transition-all hover:bg-sumi focus:ring-2 focus:ring-workgold focus:outline-none"
+            >
+              Live demo
+              <span className="font-mono text-[0.9em] transition-transform duration-300 group-hover:translate-x-1">
+                →
+              </span>
+            </a>
+          </div>
+
+          {/* right — media */}
+          <div className="relative aspect-[16/10] overflow-hidden rounded-2xl bg-[#e6e2d8] shadow-sm flex items-center justify-center">
+            {project.video ? (
+              <video src={project.video} autoPlay muted loop playsInline className="h-full w-full object-cover" />
+            ) : (
+              <div className="absolute inset-0" style={STRIPE_FILL} />
+            )}
+            {!project.video && (
+              <div className="font-mono text-[0.65rem] tracking-[0.3em] uppercase text-[#a8a294] mix-blend-multiply">
+                {project.num} — Demo Reel
+              </div>
+            )}
           </div>
         </div>
       </div>
     </div>
   )
 }
+
 
 /* The LIGHT projects section (reference redesign). Rendered as TWO fixed layers:
  *   • paperRef — a cream BACKDROP at z-1. It fades in early (PAPER_IN), hidden behind the
@@ -1679,13 +1629,13 @@ function ProjectsSection({
   paperRef,
   rowsRef,
   headerRef,
+  trackRef,
 }: {
   paperRef: React.RefObject<HTMLDivElement>
   rowsRef: React.RefObject<HTMLDivElement>
   headerRef: React.RefObject<HTMLDivElement>
+  trackRef: React.RefObject<HTMLDivElement>
 }) {
-  const [active, setActive] = useState(0) // exactly one open; project 01 starts expanded
-
   return (
     <>
       {/* cream reveal target — the dissolve resolves into this */}
@@ -1716,11 +1666,17 @@ function ProjectsSection({
           </p>
         </div>
 
-        {/* accordion list — 01→04, exactly one expanded */}
-        <div className="mt-[2vh] flex min-h-0 flex-1 flex-col">
-          {PROJECTS.map((project, i) => (
-            <ProjectRow key={project.num} project={project} active={i === active} onOpen={() => setActive(i)} />
-          ))}
+        {/* horizontally scrolling track */}
+        <div className="mt-[2vh] flex-1 w-full overflow-hidden relative">
+          <div 
+            ref={trackRef} 
+            className="absolute inset-y-0 left-0 flex will-change-transform"
+            style={{ width: `${PROJECTS.length * 100}%` }}
+          >
+            {PROJECTS.map((project) => (
+              <ProjectSlide key={project.num} project={project} />
+            ))}
+          </div>
         </div>
       </div>
     </>
@@ -2042,6 +1998,7 @@ export default function App() {
   const paperRef = useRef<HTMLDivElement>(null) // cream backdrop (z-1) — the dissolve's reveal target
   const rowsRef = useRef<HTMLDivElement>(null) // LIGHT projects content (z-40), revealed as the landscape dissolves
   const projectsHeaderRef = useRef<HTMLDivElement>(null) // section heading — shared blur-to-sharp focus pull
+  const projectsTrackRef = useRef<HTMLDivElement>(null) // horizontal project track
   // Top bar crossfade: a dark copy (hero/about), a light copy (cream projects), and a
   // dark CONTACT copy — opacity-swapped as each section lands so the bar stays legible.
   const barDarkRef = useRef<HTMLDivElement>(null)
@@ -2101,13 +2058,15 @@ export default function App() {
       // clear off the cream, the NIGHT layer + hexagon crossfade over it, then the
       // contact content focus-pulls in sequence (header → body → corners).
       const q = stackProgressRef.current
-      const cClear = smoothstep(C_CLEAR.in, C_CLEAR.out, q)
+      const cq = getContactQ(q)
+      const projectQ = getProjectQ(q)
+      const cClear = smoothstep(C_CLEAR.in, C_CLEAR.out, cq)
 
       // Cream backdrop fills in early (hidden behind the opaque landscape) so the glitch-out
       // reveals cream — it holds; the night layer simply crossfades OVER it for contact.
       if (paperRef.current) paperRef.current.style.opacity = `${smoothstep(PAPER_IN.in, PAPER_IN.out, p)}`
       if (contactNightRef.current)
-        contactNightRef.current.style.opacity = `${smoothstep(C_NIGHT.in, C_NIGHT.out, q)}`
+        contactNightRef.current.style.opacity = `${smoothstep(C_NIGHT.in, C_NIGHT.out, cq)}`
       if (rowsRef.current) {
         rowsRef.current.style.opacity = `${smoothstep(ROWS_IN.in, ROWS_IN.out, p) * (1 - cClear)}`
         // Gate interactivity: visibility:hidden also blocks the z-40 buttons from swallowing
@@ -2117,24 +2076,34 @@ export default function App() {
         rowsRef.current.style.visibility = p > 0.985 && cClear < 0.5 ? 'visible' : 'hidden'
       }
 
+      // Horizontal Scroll the projects track
+      if (projectsTrackRef.current) {
+        // stackProgressRef (q) goes 0->1 across the whole STACK_PAGES.
+        // We want to translate the track from 0 to -(N-1)*100vw.
+        // There are PROJECTS.length pages.
+        const numProjects = PROJECTS.length
+        const maxTranslate = 100 * (numProjects - 1) / numProjects
+        projectsTrackRef.current.style.transform = `translateX(-${projectQ * maxTranslate}%)`
+      }
+
       // Section heading sharpens in with the section (same blur-to-sharp focus pull as About).
       driveFocus(projectsHeaderRef.current, smoothstep(ROWS_IN.in, ROWS_IN.out, p))
 
       // CONTACT content: sequenced focus-pulls over the held paper.
-      driveFocus(contactHeadRef.current, smoothstep(C_HEAD.in, C_HEAD.out, q))
-      driveFocus(contactBodyRef.current, smoothstep(C_BODY.in, C_BODY.out, q))
-      driveFocus(contactFootRef.current, smoothstep(C_FOOT.in, C_FOOT.out, q))
+      driveFocus(contactHeadRef.current, smoothstep(C_HEAD.in, C_HEAD.out, cq))
+      driveFocus(contactBodyRef.current, smoothstep(C_BODY.in, C_BODY.out, cq))
+      driveFocus(contactFootRef.current, smoothstep(C_FOOT.in, C_FOOT.out, cq))
       // Same interactivity gate as the projects rows: the z-45 layer only exists once
       // the contact zone is actually on screen.
       if (contactLayerRef.current)
-        contactLayerRef.current.style.visibility = q > 0.38 ? 'visible' : 'hidden'
+        contactLayerRef.current.style.visibility = cq > 0.38 ? 'visible' : 'hidden'
 
       // Top bar theme: dark (hero/about) → light (projects) → dark again with the
       // Contact pill hot (night contact) — copies crossfaded per section. The light
       // copy waits for the glitch-out (LAND_VANISH) so its paper gradient NEVER shows
       // as a white band over the dark landscape/label moment.
       const lit = smoothstep(LAND_VANISH.in, ROWS_IN.out, p)
-      const nightIn = smoothstep(C_NIGHT.in, C_NIGHT.out, q)
+      const nightIn = smoothstep(C_NIGHT.in, C_NIGHT.out, cq)
       if (barDarkRef.current) barDarkRef.current.style.opacity = `${1 - lit}`
       if (barLightRef.current) barLightRef.current.style.opacity = `${lit * (1 - nightIn)}`
       if (barContactRef.current) barContactRef.current.style.opacity = `${lit * nightIn}`
@@ -2176,10 +2145,10 @@ export default function App() {
       </div>
 
       {/* Layer 1 — LIGHT PROJECTS section (reference redesign), revealed BEHIND the landscape
-          as it pixel-dissolves to cream. Click-accordion; z-1 so the dissolve reveals it
+          as it pixel-dissolves to cream. Horizontally scrolled; z-1 so the dissolve reveals it
           cleanly; pointer-events-none so the wheel still drives the katana scroll (only the
-          row buttons + live-demo links opt back in). */}
-      <ProjectsSection paperRef={paperRef} rowsRef={rowsRef} headerRef={projectsHeaderRef} />
+          project cards + live-demo links opt back in). */}
+      <ProjectsSection paperRef={paperRef} rowsRef={rowsRef} headerRef={projectsHeaderRef} trackRef={projectsTrackRef} />
 
       {/* Layer 1.2 — CONTACT (STAGE 3): the night close. Backdrop + hexagon at z-2 (under
           the spinning blade on the canvas, z-3); the contact stack at z-45. */}
